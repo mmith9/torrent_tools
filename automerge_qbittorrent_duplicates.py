@@ -43,18 +43,15 @@ def filter_no_pieces(torrents):
 
 def construct_file_dict(torrents):
     files = {}
-    count = 0
+    trr_count = 0
     for trr in torrents:
+        print('_', end='')
+        trr_count += 1
         file_offset = 0
+        file_count = 0
         for file in trr.files:
-            if count % 10 == 0:
-                print('.', end='')
-            count += 1
-            # TESTING LIMIT
-            # if count > 1000:
-            #     return files
-
             size = file.size
+            print('.', end='')
             if size < args.min_size:
                 file_offset += size
                 continue
@@ -71,7 +68,7 @@ def construct_file_dict(torrents):
             end = file.piece_range[1]
             full_path = args.qbt_tempdir + file['name'] + '.!qB'
             insert = {'file': file,
-                      'full_path':full_path,
+                      'full_path': full_path,
                       'torrent': trr,
                       'piece_size': trr.properties.piece_size,
                       'pieces_start': start,
@@ -130,18 +127,19 @@ def match_file1_to_file2(file1, file2, f2_scaled_pieces):
     matches = 0
     blocksize = file1['piece_size']
     f1_offset = (blocksize - file1['offset'] % blocksize) % blocksize
-    
+
     f1_hash_offset = file1['pieces_start']
     if f1_offset > 0:
         f1_hash_offset += 1
 
-    print('----------')
+    print('------------')
     print(file1['file']['name'])
     print('pieces start', file1['pieces_start'], 'byte offset',
-          f1_offset, 'piece offset', f1_hash_offset, 'blocksize', blocksize)
+          f1_offset, 'piece offset', f1_hash_offset, 'blocksize', size_to_dib(blocksize))
+    print('---')
     print(file2['file']['name'])
     print('pieces start', file2['pieces_start'], 'byte offset',
-          file2['offset'], 'blocksize', file2['piece_size'])
+          file2['offset'], 'blocksize', size_to_dib(file2['piece_size']))
 
     try:
 
@@ -152,13 +150,17 @@ def match_file1_to_file2(file1, file2, f2_scaled_pieces):
                 f1_hash = file1['torrent'].piece_hashes[duoblock+f1_hash_offset]
                 f2_hash = hashlib.sha1(piece).hexdigest()
 
-                print('\nblock', duoblock)
-                print(f1_hash)
-                print(f2_hash, end=' ')
-                print(f2_hash in file1['torrent'].piece_hashes,  end=' ')
+                print('block', duoblock, end=' ')
+                # print(f1_hash)
+                # print(f2_hash, end=' ')
+                # print(f2_hash in file1['torrent'].piece_hashes,  end=' ')
 
                 if f1_hash.lower() == f2_hash.lower():
                     matches += 1
+                    print(' match')
+                else:
+                    print(' no match')
+
     except Exception as err:
         logger.error(err)
         return False
@@ -194,8 +196,8 @@ def process2files(file1, file2):
     if not match_file1_to_file2(file1, file2, f2_scaled_pieces):
         return False
 
-    print(f'f1 pieces {len(file1["pieces"])} vs f2 {len(f2_scaled_pieces)}')
-    print()
+    # print(f'f1 pieces {len(file1["pieces"])} vs f2 {len(f2_scaled_pieces)}')
+    # print()
 
     # print(file1['pieces'])
     # print(file2['pieces'])
@@ -209,7 +211,7 @@ def process2files(file1, file2):
     # if decision == 'y':
     #     merge2files(file1, file2, f2_scaled_pieces)
 
-    return diff_num > 1
+    return diff_num > args.min_gain
 
 
 def get_unique_hashes(merge_list):
@@ -235,7 +237,7 @@ def extract_ranges(file):
     last_stat = 0
     if offset > 0:
         stat = file_stats[0]
-        file_stats = np.delete(file_stats,0)
+        file_stats = np.delete(file_stats, 0)
         if stat == 2:
             ranges.append([0, offset])
             last_stat = stat
@@ -265,7 +267,6 @@ def substract_ranges(ranges1_, ranges2_):
     # print(ranges2_)
     # print(ranges1)
     # print(ranges2)
-
 
     if not ranges1:
         return ranges
@@ -369,7 +370,6 @@ def merge_pairs(pairs):
         print(len(f1_ranges_dif))
         print('--')
         print(len(f2_ranges_dif))
-  
 
         try:
             with open(file1['full_path'], 'r+b') as fh1:
@@ -379,6 +379,7 @@ def merge_pairs(pairs):
         except Exception as err:
             logger.error(err)
 
+
 def copy_ranges(fh1, fh2, ranges):
     for start, end in ranges:
         fh1.seek(start)
@@ -387,6 +388,17 @@ def copy_ranges(fh1, fh2, ranges):
         fh2.write(chunk)
         print('.', end='')
     print()
+
+
+def size_to_dib(size):
+    index = 0
+    new_size = int(size / 1024)
+    while new_size > 1024:
+        new_size = int(size / 1024)
+        index += 1
+    new_size = str(new_size) + [' KiB', ' MiB', ' GiB', ' TiB'][index]
+    return new_size
+
 
 def main():
     logger.info('Connecting to server')
@@ -408,7 +420,7 @@ def main():
         merge_list.extend(pairs_to_merge)
 
     print('pairs ', len(merge_list))
-    #print(merge_list)
+    # print(merge_list)
     hashes = get_unique_hashes(merge_list)
     print('unique torrents', len(hashes))
     #decision = input('Enter to start merging')
@@ -456,6 +468,9 @@ if __name__ == "__main__":
 
     parser.add_argument('-s', dest='min_size', default=50,
                         type=int, help='min size of file to process in MB')
+
+    parser.add_argument('-m', dest='min_gain', default=2,
+                        help='Minimum blocks to gain default = 2')
 
     args = parser.parse_args()
 
