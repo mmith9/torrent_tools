@@ -451,7 +451,7 @@ if __name__ == "__main__":
     parser = ArgumentParser(
         description='delete active torrents automagically if other copy is completed.')
 
-    parser.add_argument('-d', dest='qtb_tempdir', default='q:\\tt\\',
+    parser.add_argument('-d', dest='qbt_tempdir', default='q:\\tt\\',
                         help='qbittorrent temporary directory')
 
     parser.add_argument('-s', dest='min_size', default=50,
