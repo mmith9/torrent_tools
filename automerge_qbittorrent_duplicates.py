@@ -3,10 +3,7 @@
 import hashlib
 import os
 import time
-import re
-import sys
 import qbittorrentapi
-import mysql.connector
 import numpy as np
 
 
@@ -44,11 +41,16 @@ def filter_no_pieces(torrents):
 def construct_file_dict(torrents):
     files = {}
     trr_count = 0
+    logger.info('Processing %s torrents', len(torrents))
     for trr in torrents:
         print('_', end='')
         trr_count += 1
         file_offset = 0
-        file_count = 0
+        #print(trr['state'], end=' ')
+        if not args.process_all and trr['state'].lower().startswith('paused'):
+            logger.info('skipping paused %s', trr.name)
+            continue
+
         for file in trr.files:
             size = file.size
             print('.', end='')
@@ -57,10 +59,6 @@ def construct_file_dict(torrents):
                 continue
 
             if file.priority == 0:
-                file_offset += size
-                continue
-
-            if file.progress > 0.999:
                 file_offset += size
                 continue
 
@@ -169,6 +167,13 @@ def match_file1_to_file2(file1, file2, f2_scaled_pieces):
 
 
 def process2files(file1, file2):
+    try:
+        if os.path.samefile(file1['full_path'], file2['full_path']):
+            logger.info('diff paths lead to same file, skipping pair')
+            return False
+    except Exception as err:
+        logger.error(err)
+        return False
 
     extract_piece_info(file1)
     if max(file1['pieces']) < 2:
@@ -354,30 +359,179 @@ def substract_ranges(ranges1_, ranges2_):
         assert False
 
 
+def extend_file(full_path, desired_size):
+    logger.debug('Extending to %s bytes, %s', desired_size, full_path)
+
+    try:
+        physical_size = os.path.getsize(full_path)
+    except Exception as err:
+        logger.error(err)
+        return False
+
+    difference = desired_size - physical_size
+    if difference <= 0:
+        logger.error('File bigger than desired size %s bytes %s',
+                     desired_size, full_path)
+        return False
+
+    logger.debug('Opening %s', full_path)
+    try:
+        with open(full_path, 'r+b') as fp:
+            fp.seek(physical_size)
+            while difference > args.buffer_size:
+                fp.write(bytearray(args.buffer_size))
+                difference -= args.buffer_size
+            if difference > 0:
+                fp.write(bytearray(difference))
+    except Exception as err:
+        logger.error(err)
+        return False
+
+    try:
+        new_physical_size = os.path.getsize(full_path)
+    except Exception as err:
+        logger.error(err)
+        return False
+
+    if new_physical_size != desired_size:
+        logger.critical('Extending to %s failed, got %s, on %s',
+                        desired_size, new_physical_size, full_path)
+        return False
+
+    return True
+
+
+def verify_physical_filesize(file):
+    logger.debug('getting physical files sizes')
+    try:
+        f_size = os.path.getsize(file['full_path'])
+    except Exception as err:
+        logger.error(err)
+        return False
+
+    if f_size < file['file'].size:
+        if not extend_file(file['full_path'], file['file'].size):
+            return False
+    return True
+
+
+def full_merge(file1, file2):
+    logger.debug('opening file 1')
+    try:
+        fh1 = open(file1['full_path'], 'rb+')
+    except Exception as err:
+        logger.error(err)
+        return False
+
+    logger.debug('opening file 2')
+    try:
+        fh2 = open(file2['full_path'], 'rb+')
+    except Exception as err:
+        logger.error(err)
+        return False
+
+    block_num = 0
+    total_blocks = int((file2['file'].size - 1) / args.buffer_size) + 1
+    print(file1['file']['name'])
+    print(file2['file']['name'])
+    print(
+        f'Processing {size_to_dib(file1["file"].size)} in {size_to_dib(args.buffer_size)} blocks: ')
+    try:
+        while True:
+            if block_num < total_blocks:
+                print(f'Block {block_num+1} of {total_blocks}   \r', end='')
+            fh1.seek(block_num*args.buffer_size, 0)
+            fread1 = fh1.read(args.buffer_size)
+            if len(fread1) == 0:
+                break
+            fh2.seek(block_num*args.buffer_size, 0)
+            fread2 = fh2.read(args.buffer_size)
+            fa1 = np.frombuffer(fread1, dtype=np.ubyte, count=-1)
+            fa2 = np.frombuffer(fread2, dtype=np.ubyte, count=-1)
+
+            fa3 = np.fmax(fa1, fa2)
+
+            fh1.seek(block_num*args.buffer_size, 0)
+            fh1.write(fa3.tobytes())
+            fh2.seek(block_num*args.buffer_size, 0)
+            fh2.write(fa3.tobytes())
+            block_num += 1
+    except Exception as err:
+        print()
+        logger.error(err)
+        fh1.close()
+        fh2.close()
+        return False
+
+    print()
+    fh1.close()
+    fh2.close()
+    return True
+
+
+def hard_merge(file1, file2):
+    print('HARD merge')
+    print(file1['full_path'])
+    print(file2['full_path'])
+    pass
+
+
 def merge_pairs(pairs):
     for file1, file2 in pairs:
-        f1_ranges = extract_ranges(file1)
-        f2_ranges = extract_ranges(file2)
+        if file1['file'].size != file2['file'].size:
+            logger.error('final file sizes mismatch %s %s',
+                         file1['file'].size, file2['file'].size)
+            continue
 
-        f1_ranges_dif = substract_ranges(f1_ranges, f2_ranges)
-        f2_ranges_dif = substract_ranges(f2_ranges, f1_ranges)
+        hashes = [file1['torrent'].hash, file2['torrent'].hash]
 
-        print(file1['file']['name'])
-        print(len(f1_ranges))
-        print(file2['file']['name'])
-        print(len(f2_ranges))
-        print('--')
-        print(len(f1_ranges_dif))
-        print('--')
-        print(len(f2_ranges_dif))
+        both_paused = False
+        time_start = time.time()
+        while not both_paused:
+            if time.time() - time_start > args.timeout:
+                logger.error('torrents not paused timeout')
+                return False
+            torrents = args.qbt_client.torrents_info(hashes)
+            both_paused = True
+            for trr in torrents:
+                both_paused &= trr['state'].lower().startswith('paused')
+            if not both_paused:
+                args.qbt_client.torrents_pause(hashes)
+                time.sleep(1)
 
-        try:
-            with open(file1['full_path'], 'r+b') as fh1:
-                with open(file2['full_path'], 'r+b') as fh2:
-                    copy_ranges(fh1, fh2, f1_ranges_dif)
-                    copy_ranges(fh2, fh1, f2_ranges_dif)
-        except Exception as err:
-            logger.error(err)
+        if not verify_physical_filesize(file1):
+            continue
+        if not verify_physical_filesize(file2):
+            continue
+
+        if args.hardmerge:
+            hard_merge(file1, file2)
+
+        elif args.fullmerge:
+            full_merge(file1, file2)
+        else:
+            block_merge(file1, file2)
+
+
+def block_merge(file1, file2):
+    f1_ranges = extract_ranges(file1)
+    f2_ranges = extract_ranges(file2)
+
+    f1_ranges_dif = substract_ranges(f1_ranges, f2_ranges)
+    f2_ranges_dif = substract_ranges(f2_ranges, f1_ranges)
+
+    print(file1['file']['name'])
+    print(file2['file']['name'])
+    print(f'ranges1 {len(f1_ranges)} diff {len(f1_ranges_dif)}')
+    print(f'ranges2 {len(f2_ranges)} diff {len(f2_ranges_dif)}')
+
+    try:
+        with open(file1['full_path'], 'r+b') as fh1:
+            with open(file2['full_path'], 'r+b') as fh2:
+                copy_ranges(fh1, fh2, f1_ranges_dif)
+                copy_ranges(fh2, fh1, f2_ranges_dif)
+    except Exception as err:
+        logger.error(err)
 
 
 def copy_ranges(fh1, fh2, ranges):
@@ -403,8 +557,9 @@ def size_to_dib(size):
 def main():
     logger.info('Connecting to server')
     qbt_client = connect_qb()
-    logger.info('Retrieving torrent info')
-    torrents = qbt_client.torrents_info(status_filter='resumed')
+    args.qbt_client = qbt_client
+    logger.info('Retrieving torrent info - all files')
+    torrents = qbt_client.torrents_info()
     logger.info('Got torrents')
 
     logger.info('filter no meta')
@@ -445,21 +600,12 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    # fh = logging.FileHandler(__name__ + '.txt')
-    # fh.setLevel(logging.DEBUG)
-    # fh.setFormatter(formatter)
     sh = logging.StreamHandler()
     sh.setLevel(logging.DEBUG)
-    # sh.setFormatter(formatter)
-    # logger.addHandler(fh)
-
+    sh.setFormatter(formatter)
     logger.addHandler(sh)
 
-    import pprint
-    pprinter = pprint.PrettyPrinter()
-
     from argparse import ArgumentParser
-
     parser = ArgumentParser(
         description='delete active torrents automagically if other copy is completed.')
 
@@ -472,8 +618,27 @@ if __name__ == "__main__":
     parser.add_argument('-m', dest='min_gain', default=2,
                         help='Minimum blocks to gain default = 2')
 
-    args = parser.parse_args()
+    parser.add_argument('-all', dest='process_all', default=False, action='store_true',
+                        help='Inject into paused files too, default false')
 
+    parser.add_argument('-b', '--buffersize', dest='buffer_size', default=50, type=int,
+                        help='buffers MiB size (two files, two buffers) for same disc read speed up default 50MiB == 100MiB required')
+
+    parser.add_argument('-fullmerge', default=False, action='store_true',
+                        help='Perform full merge for SPARSE FILES ONLY, does array np.max(file1, file2)')
+
+    parser.add_argument('-hardmerge', default=False, action='store_true',
+                        help='Point both torrents to 3rd (possible merged) file')
+
+    parser.add_argument('-mergedir', default='q:\\autoram\\', type=str,
+                        help='dir for bekap, backrolls and merges')
+
+
+
+    args = parser.parse_args()
+    args.timeout = 10
+
+    args.buffer_size = args.buffer_size * 1024 * 1024
     args.min_size *= 1024*1024
 
     time_start = time.time()
