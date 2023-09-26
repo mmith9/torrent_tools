@@ -2,9 +2,11 @@
 
 import hashlib
 import os
+import shutil
 import time
-import qbittorrentapi
+
 import numpy as np
+import qbittorrentapi
 
 
 def connect_qb():
@@ -40,56 +42,64 @@ def filter_no_pieces(torrents):
 
 def construct_file_dict(torrents):
     files = {}
-    trr_count = 0
     logger.info('Processing %s torrents', len(torrents))
     for trr in torrents:
         print('_', end='')
-        trr_count += 1
         file_offset = 0
         #print(trr['state'], end=' ')
         if not args.process_all and trr['state'].lower().startswith('paused'):
-            logger.info('skipping paused %s', trr.name)
+            logger.debug('skipping paused %s', trr.name)
             continue
 
         for file in trr.files:
             size = file.size
             print('.', end='')
-            if size < args.min_size:
-                file_offset += size
-                continue
 
-            if file.priority == 0:
+            skip = size < args.min_size
+            skip = skip or file.priority == 0
+            skip = skip or file.progress == 0
+#            skip = skip or trr.properties.piece_size > file['completed']
+
+            if skip:
                 file_offset += size
                 continue
 
             start = file.piece_range[0]
             end = file.piece_range[1]
-            full_path = args.qbt_tempdir + file['name'] + '.!qB'
+            full_path_client = args.qbt_tempdir_client + file['name'] + '.!qB'
             insert = {'file': file,
-                      'full_path': full_path,
+                      'filename': file['name'],
+                      'path_server': file['name'],
+                      'full_path_client': full_path_client,
+                      'id': file['id'],
                       'torrent': trr,
+                      'hash': trr['hash'],
                       'piece_size': trr.properties.piece_size,
                       'pieces_start': start,
                       'pieces_end': end,
-                      'offset': file_offset
+                      'offset': file_offset,
+                      'progress': file['progress']
                       }
 
             if size not in files:
                 files[size] = []
             files[size].append(insert)
             file_offset += size
-
+    print()
     return files
 
 
-def match_files(files):
+def match_files_multi(files):
     merges = []
     while len(files) >= 2:
-        file1 = files.pop()
-        for file2 in files:
-            if file1['full_path'] != file2['full_path']:
-                if process2files(file1, file2):
-                    merges.append((file1, file2))
+        file0 = files.pop()
+        file0_and_clones = [file0]
+        for file in reversed(files):
+            if is_file_unique(file, file0_and_clones) and process2files(file0, file):
+                file0_and_clones.append(file)
+                files.remove(file)
+        if len(file0_and_clones) > 1:
+            merges.append(file0_and_clones)
     return merges
 
 
@@ -141,7 +151,7 @@ def match_file1_to_file2(file1, file2, f2_scaled_pieces):
 
     try:
 
-        with open(file2['full_path'], 'rb') as fh2:
+        with open(file2['full_path_client'], 'rb') as fh2:
             for duoblock in duoblocks:
                 fh2.seek(f1_offset + duoblock*blocksize)
                 piece = fh2.read(blocksize)
@@ -160,20 +170,40 @@ def match_file1_to_file2(file1, file2, f2_scaled_pieces):
                     print(' no match')
 
     except Exception as err:
+        logger.error('matching error')
+        logger.error(
+            'h1 %s f1 %s', file1['torrent'].hash, file1['full_path_client'])
+        logger.error(
+            'h2 %s f2 %s', file2['torrent'].hash, file2['full_path_client'])
         logger.error(err)
         return False
 
     return matches == 3
 
+def is_file_unique(newfile, files):
 
-def process2files(file1, file2):
     try:
-        if os.path.samefile(file1['full_path'], file2['full_path']):
-            logger.info('diff paths lead to same file, skipping pair')
-            return False
+        if not os.path.isfile(newfile['full_path_client']):
+            logger.debug('file does not exist, so its unique %s', newfile['filename'])
+            return True
+
+        for file in files:
+            if newfile['path_server'] == file['path_server']:
+                return False
+            if not os.path.isfile(file['full_path_client']):
+                continue
+            if os.path.samefile(newfile['full_path_client'], file['full_path_client']):
+                return False
+      
+        return True
+
     except Exception as err:
+        logger.error('cant verify uniqueness of %s', newfile['filename'])
         logger.error(err)
         return False
+  
+
+def process2files(file1, file2):
 
     extract_piece_info(file1)
     if max(file1['pieces']) < 2:
@@ -221,9 +251,9 @@ def process2files(file1, file2):
 
 def get_unique_hashes(merge_list):
     hashes = set()
-    for f1, f2 in merge_list:
-        hashes.add(f1['torrent'].hash)
-        hashes.add(f2['torrent'].hash)
+    for group in merge_list:
+        for file in group:
+            hashes.add(file['torrent'].hash)
     return list(hashes)
 
 
@@ -359,11 +389,11 @@ def substract_ranges(ranges1_, ranges2_):
         assert False
 
 
-def extend_file(full_path, desired_size):
-    logger.debug('Extending to %s bytes, %s', desired_size, full_path)
+def extend_file(full_path_client, desired_size):
+    logger.debug('Extending to %s bytes, %s', desired_size, full_path_client)
 
     try:
-        physical_size = os.path.getsize(full_path)
+        physical_size = os.path.getsize(full_path_client)
     except Exception as err:
         logger.error(err)
         return False
@@ -371,31 +401,31 @@ def extend_file(full_path, desired_size):
     difference = desired_size - physical_size
     if difference <= 0:
         logger.error('File bigger than desired size %s bytes %s',
-                     desired_size, full_path)
+                     desired_size, full_path_client)
         return False
 
-    logger.debug('Opening %s', full_path)
+    logger.debug('Opening %s', full_path_client)
     try:
-        with open(full_path, 'r+b') as fp:
-            fp.seek(physical_size)
+        with open(full_path_client, 'r+b') as fh:
+            fh.seek(physical_size)
             while difference > args.buffer_size:
-                fp.write(bytearray(args.buffer_size))
+                fh.write(bytearray(args.buffer_size))
                 difference -= args.buffer_size
             if difference > 0:
-                fp.write(bytearray(difference))
+                fh.write(bytearray(difference))
     except Exception as err:
         logger.error(err)
         return False
 
     try:
-        new_physical_size = os.path.getsize(full_path)
+        new_physical_size = os.path.getsize(full_path_client)
     except Exception as err:
         logger.error(err)
         return False
 
     if new_physical_size != desired_size:
         logger.critical('Extending to %s failed, got %s, on %s',
-                        desired_size, new_physical_size, full_path)
+                        desired_size, new_physical_size, full_path_client)
         return False
 
     return True
@@ -404,134 +434,224 @@ def extend_file(full_path, desired_size):
 def verify_physical_filesize(file):
     logger.debug('getting physical files sizes')
     try:
-        f_size = os.path.getsize(file['full_path'])
+        f_size = os.path.getsize(file['full_path_client'])
     except Exception as err:
         logger.error(err)
         return False
 
     if f_size < file['file'].size:
-        if not extend_file(file['full_path'], file['file'].size):
+        if not extend_file(file['full_path_client'], file['file'].size):
             return False
     return True
 
 
-def full_merge(file1, file2):
-    logger.debug('opening file 1')
-    try:
-        fh1 = open(file1['full_path'], 'rb+')
-    except Exception as err:
-        logger.error(err)
-        return False
+def merge_multi(files):
+    hashes = []
+    for file in files:
+        hashes.append(file['hash'])
+        if file['file'].size != files[0]['file'].size:
+            logger.error('final file sizes mismatch %s %s',
+                         files[0]['file'].size, file['file'].size)
+            return False
 
-    logger.debug('opening file 2')
+    all_paused = False
+    t_start = time.time()
+    while not all_paused:
+
+        if time.time() - t_start > args.timeout:
+            logger.error('torrents not paused timeout')
+            print('Torrents not paused timeout')
+            answer = 'null'
+            while answer.lower() not in ['r', 'a', 'i']:
+                answer = input('(r)etry pausing, (i)gnore pausing, (s)kip').lower()
+
+            if answer == 'r':
+                t_start = time.time()
+                continue
+            if answer == 's':
+                return False
+            if answer == 'i':
+                break
+
+        torrents = args.qbt_client.torrents_info(hashes=hashes)
+        all_paused = True
+        for trr in torrents:
+            all_paused = all_paused and trr['state'].lower().startswith('paused')
+        if not all_paused:
+            args.qbt_client.torrents_pause(hashes=hashes)
+            time.sleep(5)
+
+    for file in files:
+        if not verify_physical_filesize(file):
+            return False
+
+    if args.hardmerge:
+        hard_merge(files)
+    elif args.maxmerge:
+        max_merge(files)
+    else:
+        logger.error('section disabled')
+
+def max_merge(files, direction='all'):
+    logger.debug('opening files')
+    fhs = []
     try:
-        fh2 = open(file2['full_path'], 'rb+')
+        for file in files:
+            fhs.append(open(file['full_path_client'], 'rb+'))
     except Exception as err:
         logger.error(err)
         return False
 
     block_num = 0
-    total_blocks = int((file2['file'].size - 1) / args.buffer_size) + 1
-    print(file1['file']['name'])
-    print(file2['file']['name'])
+    total_blocks = int((files[0]['file'].size - 1) / args.buffer_size) + 1
+    for file in files:
+        print(file['file']['name'])
+
     print(
-        f'Processing {size_to_dib(file1["file"].size)} in {size_to_dib(args.buffer_size)} blocks: ')
+        f'Processing {size_to_dib(files[0]["file"].size)} in {size_to_dib(args.buffer_size)} blocks')
     try:
+        all_done = False
         while True:
             if block_num < total_blocks:
                 print(f'Block {block_num+1} of {total_blocks}   \r', end='')
-            fh1.seek(block_num*args.buffer_size, 0)
-            fread1 = fh1.read(args.buffer_size)
-            if len(fread1) == 0:
+
+            block = None
+            block_is_first = True
+            for fh in fhs:
+                fh.seek(block_num*args.buffer_size, 0)
+                buffer = fh.read(args.buffer_size)
+                if len(buffer) == 0:
+                    all_done = True
+                    break
+                if block_is_first:
+                    block = np.frombuffer(buffer, dtype=np.ubyte, count=-1)
+                    block_is_first = False
+                else:
+                    block = np.fmax(block, np.frombuffer(
+                        buffer, dtype=np.ubyte, count=-1))
+            if all_done:
                 break
-            fh2.seek(block_num*args.buffer_size, 0)
-            fread2 = fh2.read(args.buffer_size)
-            fa1 = np.frombuffer(fread1, dtype=np.ubyte, count=-1)
-            fa2 = np.frombuffer(fread2, dtype=np.ubyte, count=-1)
 
-            fa3 = np.fmax(fa1, fa2)
-
-            fh1.seek(block_num*args.buffer_size, 0)
-            fh1.write(fa3.tobytes())
-            fh2.seek(block_num*args.buffer_size, 0)
-            fh2.write(fa3.tobytes())
+            for count, fh in enumerate(fhs, 1):
+                if direction in ['all', f'to{str(count)}']:
+                    logger.debug('writing block to file %s', count)
+                    fh.seek(block_num*args.buffer_size, 0)
+                    fh.write(block.tobytes())
             block_num += 1
     except Exception as err:
         print()
         logger.error(err)
-        fh1.close()
-        fh2.close()
+        for fh in fhs:
+            fh.close()
         return False
 
     print()
-    fh1.close()
-    fh2.close()
+    for fh in fhs:
+        fh.close()
     return True
 
-
-def hard_merge(file1, file2):
-    print('HARD merge')
-    print(file1['full_path'])
-    print(file2['full_path'])
-    pass
-
-
-def merge_pairs(pairs):
-    for file1, file2 in pairs:
-        if file1['file'].size != file2['file'].size:
-            logger.error('final file sizes mismatch %s %s',
-                         file1['file'].size, file2['file'].size)
-            continue
-
-        hashes = [file1['torrent'].hash, file2['torrent'].hash]
-
-        both_paused = False
-        time_start = time.time()
-        while not both_paused:
-            if time.time() - time_start > args.timeout:
-                logger.error('torrents not paused timeout')
-                return False
-            torrents = args.qbt_client.torrents_info(hashes)
-            both_paused = True
-            for trr in torrents:
-                both_paused &= trr['state'].lower().startswith('paused')
-            if not both_paused:
-                args.qbt_client.torrents_pause(hashes)
-                time.sleep(1)
-
-        if not verify_physical_filesize(file1):
-            continue
-        if not verify_physical_filesize(file2):
-            continue
-
-        if args.hardmerge:
-            hard_merge(file1, file2)
-
-        elif args.fullmerge:
-            full_merge(file1, file2)
-        else:
-            block_merge(file1, file2)
-
-
-def block_merge(file1, file2):
-    f1_ranges = extract_ranges(file1)
-    f2_ranges = extract_ranges(file2)
-
-    f1_ranges_dif = substract_ranges(f1_ranges, f2_ranges)
-    f2_ranges_dif = substract_ranges(f2_ranges, f1_ranges)
-
-    print(file1['file']['name'])
-    print(file2['file']['name'])
-    print(f'ranges1 {len(f1_ranges)} diff {len(f1_ranges_dif)}')
-    print(f'ranges2 {len(f2_ranges)} diff {len(f2_ranges_dif)}')
-
+def swap_files_inplace(file1, file2):
+    temp_file = os.path.join(args.merge_dir_client, 'temp_swap_file')
     try:
-        with open(file1['full_path'], 'r+b') as fh1:
-            with open(file2['full_path'], 'r+b') as fh2:
-                copy_ranges(fh1, fh2, f1_ranges_dif)
-                copy_ranges(fh2, fh1, f2_ranges_dif)
+        shutil.move(file1['full_path_client'], temp_file)
+        shutil.move(file2['full_path_client'], file1['full_path_client'])
+        shutil.move(temp_file, file2['full_path_client'])
+       
     except Exception as err:
+        logger.critical('Inplace swap FAIL')
+        logger.critical('file1 %s', file1['full_path_client'])
+        logger.critical('file2 %s', file2['full_path_client'])
+        logger.critical('tmpfile %s', temp_file)
         logger.error(err)
+        input(' HALT !!!!')
+        return False
+    return True
+
+def hard_merge(files):
+    logger.debug('Starting hard merge')
+    time_now = int(time.time())
+
+    # first merge into most complete file
+    files.sort(key = lambda x: x['progress'], reverse=True)
+    file0 = files[0]
+
+    answer = args.auto_yes
+    answer = answer or input('Merge MAX first?') == 'y'
+
+    if answer:
+        logger.info('merging %s files into %s', len(files), file0['filename'])
+        for file in files:
+            print(file['hash'])
+            print(file['filename'])
+            print(file['full_path_client'])
+            print()
+
+        if not max_merge(files, direction='to1'):
+            logger.debug('max merge pre hard merge fail')
+            return False
+        logger.debug('max pre hard success')
+
+    #second use biggest torrent as parent
+    files.sort(key = lambda x: x['torrent'].size, reverse=True)
+    file_parent = files.pop(0)
+
+    final_dest = file_parent['path_server']
+    logger.debug('final dest %s', final_dest)
+
+    input(' PAUSE ')
+    if file0 != file_parent:
+        swap_files_inplace(file0, file_parent)
+
+    #point torrents to parent and stash obsolete files
+    for file in files:
+        logger.debug('moving %s to', file['filename'])
+        new_path_client = os.path.join(args.merge_dir_client, file['hash'])
+        new_path_client = os.path.join(new_path_client, file['filename'])
+        logger.debug(new_path_client)
+
+        dir_to_make, _ = os.path.split(new_path_client)
+        os.makedirs(dir_to_make, exist_ok=True)
+        shutil.move(file['full_path_client'], new_path_client)
+        logger.debug('file moved')
+
+        new_path_server = final_dest
+        print(new_path_client)
+        print(new_path_server)
+        with open(
+                os.path.join(args.merge_dir_client, f'log_{time_now}.txt')\
+                    , 'a', encoding='utf-8') as fh:
+
+            fh.writelines(f'''
+---------
+epoch: {int(time.time())}
+hash1: {file['hash']}
+torrent1: {file['torrent'].name}
+file1: {file['filename']}
+old path: {file['full_path_client']}
+new path: {new_path_client}
+new path server: {new_path_server}
+dest: {final_dest}
+
+        ''')
+
+        logger.info('Renaming file in qbittorrent')
+        args.qbt_client.torrents_rename_file(
+            torrent_hash=file['hash'], file_id=file['id'],
+            old_path=file['path_server'],
+            new_path=final_dest
+        )
+        args.qbt_client.torrents_add_tags(torrent_hashes=file['hash'], tags='_ram_clone')
+
+        if file['torrent'].size < 2 *1024*1024*1024:
+            args.qbt_client.torrents_resume([file['hash']])
+            args.qbt_client.torrents_recheck([file['hash']])
+
+    args.qbt_client.torrents_add_tags(torrent_hashes=file_parent['hash'], tags='_ram_parent')
+    if file_parent['torrent'].size < 2 *1024*1024*1024:
+        args.qbt_client.torrents_resume([file_parent['hash']])
+        args.qbt_client.torrents_recheck([file_parent['hash']])
+
+    return True
 
 
 def copy_ranges(fh1, fh2, ranges):
@@ -559,7 +679,7 @@ def main():
     qbt_client = connect_qb()
     args.qbt_client = qbt_client
     logger.info('Retrieving torrent info - all files')
-    torrents = qbt_client.torrents_info()
+    torrents = qbt_client.torrents_info()# hashes=test_hashes)
     logger.info('Got torrents')
 
     logger.info('filter no meta')
@@ -571,10 +691,10 @@ def main():
 
     merge_list = []
     for _, files in file_dict.items():
-        pairs_to_merge = match_files(files)
-        merge_list.extend(pairs_to_merge)
+        files_to_merge = match_files_multi(files)
+        merge_list.extend(files_to_merge)
 
-    print('pairs ', len(merge_list))
+    print('pairs or mores', len(merge_list))
     # print(merge_list)
     hashes = get_unique_hashes(merge_list)
     print('unique torrents', len(hashes))
@@ -582,16 +702,16 @@ def main():
     print('pausing torrents')
     qbt_client.torrents_pause(hashes)
 
-    time.sleep(10)
     print('Merge start')
 
-    merge_pairs(merge_list)
+    for group in merge_list:
+        merge_multi(group)
     print('resuming torrents')
     qbt_client.torrents_resume(hashes)
     print('forcing rechecks')
     qbt_client.torrents_recheck(hashes)
 
-    time.sleep(10)
+    # time.sleep(10)
 
 
 if __name__ == "__main__":
@@ -609,38 +729,44 @@ if __name__ == "__main__":
     parser = ArgumentParser(
         description='delete active torrents automagically if other copy is completed.')
 
-    parser.add_argument('-d', dest='qbt_tempdir', default='q:\\tt\\',
-                        help='qbittorrent temporary directory')
+    parser.add_argument('-tdc', dest='qbt_tempdir_client', default='q:\\tt\\',
+                        help='qbittorrent temporary directory from server perspective')
 
     parser.add_argument('-s', dest='min_size', default=50,
                         type=int, help='min size of file to process in MB')
 
-    parser.add_argument('-m', dest='min_gain', default=2,
+    parser.add_argument('-m', dest='min_gain', default=2, type=int,
                         help='Minimum blocks to gain default = 2')
 
     parser.add_argument('-all', dest='process_all', default=False, action='store_true',
                         help='Inject into paused files too, default false')
 
     parser.add_argument('-b', '--buffersize', dest='buffer_size', default=50, type=int,
-                        help='buffers MiB size (two files, two buffers) for same disc read speed up default 50MiB == 100MiB required')
+        help='buffers (x2) MiB size for same disc read speed up default 50MiB == 100MiB required')
 
-    parser.add_argument('-fullmerge', default=False, action='store_true',
-                        help='Perform full merge for SPARSE FILES ONLY, does array np.max(file1, file2)')
+    parser.add_argument('-maxmerge', default=False, action='store_true',
+        help='Perform full merge for SPARSE FILES ONLY, does array np.max(file1, file2)')
 
     parser.add_argument('-hardmerge', default=False, action='store_true',
                         help='Point both torrents to 3rd (possible merged) file')
 
-    parser.add_argument('-mergedir', default='q:\\autoram\\', type=str,
-                        help='dir for bekap, backrolls and merges')
+    parser.add_argument('-mdc', dest='merge_dir_client', default='q:\\tt\\autoram\\', type=str,
+                        help='dir for bekap, backrolls and merges visible locally')
 
+    parser.add_argument('-mds', dest='merge_dir_server', default='autoram/', type=str,
+                        help='dir for bekap, backrolls and merges visible on server')
 
+    parser.add_argument('-debug', dest='debug', action='store_true')
+    parser.add_argument('-yy', dest='auto_yes',
+                        action='store_true', help='auto yes all')
 
     args = parser.parse_args()
-    args.timeout = 10
+    args.timeout = 60
 
     args.buffer_size = args.buffer_size * 1024 * 1024
     args.min_size *= 1024*1024
-
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
     time_start = time.time()
     main()
     time_end = time.time()
