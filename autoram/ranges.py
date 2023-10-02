@@ -41,7 +41,12 @@ def size_to_dib(size):
     return new_size
 
 def sum_ranges(ranges):
-    sum = 0
+    the_sum = 0
     for rang in ranges:
-        sum += rang.upper-rang.lower+1
-    return sum
+        the_sum += rang.upper-rang.lower+1
+    return the_sum
+
+def shift_ranges(ranges, distance):
+    ranges = ranges.apply(lambda x: (x.left, x.lower + distance, x.upper+distance, x.right))
+    return ranges
+

@@ -12,7 +12,7 @@ import numpy as np
 
 from autoram.qbt_api import connect_qbt
 from autoram.tr_payload import construct_file_dict
-from autoram.ranges import II, get_block_ranges, estimate_gain_from_repair, sum_ranges, size_to_dib
+from autoram.ranges import II, get_block_ranges, estimate_gain_from_repair, shift_ranges, sum_ranges, size_to_dib
 from autoram.test_hashes import test_hashes
 from autoram.files_on_disk import verify_and_fix_physical_file
 from autoram.files_on_disk import read_block, read_ranges, write_block,\
@@ -65,10 +65,17 @@ def merge_multi(files):
 
     for file in files:
         if not verify_and_fix_physical_file(file):
-            # logger.debug('verify failed')
+            # logger.debug('verify size failed')
             return False
    
-    quick_fix_files(files)
+    return quick_fix_files(files)
+    
+
+def ask_user(question, choices):
+    answer = 'none'
+    while answer not in choices:
+        answer = input(question)
+    return answer
 
 def quick_fix_files(files):
     files.sort(key= lambda x: x['progress'], reverse = True)
@@ -81,27 +88,20 @@ def quick_fix_files(files):
     print('copies:')
     for copy in files[1:]:
         print(copy['filename'])
-    #print()
-    #print('need ranges', file['ranges_needed'])
+
     est_gain, est_left =  estimate_gain_from_repair(file, files[1:])
-    # print('estimated gain', est_gain)
-    # print('estimated gaps left', est_left)
-    # print()
+    est_gain_bytes = sum_ranges(est_gain)
+    est_left_bytes = sum_ranges(est_left)
+    print('estimated gain', size_to_dib(est_gain_bytes))
+    print('estimated left',size_to_dib(est_left_bytes))
 
-    print('estimated gain', size_to_dib(sum_ranges(est_gain)))
-    print('estimated left',size_to_dib(sum_ranges(est_left)))
-
-    print('repair?')
-    answer = 'x'
-    while answer not in ['y','n']:
-        answer = input()
-    
-    if answer == 'n':
+    if args.auto and est_gain_bytes == 0:
+        return
+    elif not args.auto and ask_user('Repair?', ['y','n']) == 'n':
         return
 
     blocks_fixed = 0
     for blocknum, status in enumerate(file['piece_states']):
-
         if status != 2:
             rebuilt = rebuild_block(file, blocknum, files[1:])
             if rebuilt:
@@ -114,24 +114,30 @@ def quick_fix_files(files):
     print('\n')
     print('blocks fixed:', blocks_fixed)
 
-    answer = 'x'
-    while answer not in ['y','n']:
-        answer = input('Recheck file?')
-    
-    if answer == 'n':
+    if args.auto:
+        if not args.hammer:
+            return
+        if file['progress'] < 0.7:
+            return
+
+    elif not args.auto and ask_user('hammer file?', ['y', 'n']) == 'n':
         return
-    recheck_file(file, full_check=True)
 
-    answer = 'x'
-    while answer not in ['y','n']:
-        answer = input('Force qbittorrent recheck?')
-    
-    if answer == 'n':
-        return
-    args.qbt_client.recheck(torrent_hashes = file['torrent'].hash)
+    blocks_hammered = 0
+    for blocknum, status in enumerate(file['piece_states']):
+        if status != 2:
+            rebuilt = hammer_block(file, blocknum, files[1:])
+            if rebuilt:
+                blocks_hammered +=1
+                print('O', end='')
+            else:
+                print('.', end='')
+        else:
+            print('o', end='')
+    print('\n')
+    print('blocks fixed:', blocks_hammered)
 
-
-
+ 
 
 
 def find_blocks_in_other_file(file1, file2):
@@ -209,7 +215,7 @@ def find_files_to_merge(file_dict):
     group_limit = config.getint('behaviour','group_limit')
     for _, files in file_dict.items():
         count+=1
-        print(f'{count}/{groups_total }', end ='')
+        print(f'{count}/{groups_total} ', end ='')
         if len(files) > group_limit:
             logger.debug('skipping group of size %s too many files', files[0]['size'])
             continue
@@ -279,14 +285,12 @@ def get_unique_hashes(merge_list):
             hashes.add(file['torrent'].hash)
     return list(hashes)
 
-
-
 def rebuild_block(source_file, blocknum, source_files):
     all_files = []
     all_files.append(source_file)
     all_files.extend(source_files)
 
-    need_ranges, _ = get_block_ranges(source_file, blocknum)
+    need_ranges, block_size = get_block_ranges(source_file, blocknum)
 
     rebuild_ranges = II.empty()
     #logger.debug('repairing block %s in %s', blocknum, source_file['debug'])
@@ -308,7 +312,7 @@ def rebuild_block(source_file, blocknum, source_files):
         #logger.debug('Cant rebuild block, no pieces in other files')
         return False
 
-    block_data = np.zeros(source_file['piece_size'], dtype=np.ubyte)
+    block_data = np.zeros(block_size, dtype=np.ubyte)
     for file in all_files:
         usable_ranges = need_ranges & file['ranges_complete']
         assert len(usable_ranges) <= 1
@@ -317,12 +321,7 @@ def rebuild_block(source_file, blocknum, source_files):
             data_upper = usable_ranges.upper - need_ranges.lower +1
             range_data = read_ranges(file, usable_ranges)
 
-            # print('!!!!!')
-            # print(data_lower, data_upper, len(range_data), len(block_data))
-
             block_data[data_lower:data_upper] = range_data
-
-
             need_ranges = need_ranges - usable_ranges
 
     is_shared_block = (blocknum == 0 and source_file['first_block_shared']) or \
@@ -334,6 +333,7 @@ def rebuild_block(source_file, blocknum, source_files):
     if is_shared_block:
         block_fixed = verify_block_shared(
             source_file, blocknum=blocknum, block_data=block_data, source_files=source_files)
+        logger.debug('Tried to verify SHARED block, result %s', block_fixed)
     else:
         block_fixed = verify_block(
             source_file, blocknum=blocknum, block_data=block_data)
@@ -342,53 +342,171 @@ def rebuild_block(source_file, blocknum, source_files):
     if block_fixed:
         # logger.debug('block %s fixed', blocknum)
         return write_block(source_file, blocknum, block_data)
+
+
+
+def detect_non_zero_ranges_in_block(data):
+    if not np.any(data):
+        return II.empty()
+
+    if len(data) < 1024:
+        return II.closedopen(0, len(data))
+
+    half = int(len(data)/2)
+    r1 = detect_non_zero_ranges_in_block(data[0:half])
+    r2 = detect_non_zero_ranges_in_block(data[half:])
+    r2 = shift_ranges(r2, half)
+    return r1 | r2
+
+
+def hammer_block(source_file, blocknum, source_files):
+    logger.debug('------- block --------- ')
+    logger.debug('blocknum %s', blocknum)
+    all_files = []
+    all_files.append(source_file)
+    all_files.extend(source_files)
+
+    need_ranges, block_size = get_block_ranges(source_file, blocknum)
+
+    block_pool = []
+    block_pool.append(np.zeros(block_size, dtype=np.ubyte))
+    for file in all_files:
+        block = read_ranges(file, need_ranges)
+        if block is not False:
+            block_pool.append(block)
+
+    check_ranges = [need_ranges]
+    logger.debug(' check ranges %s', len(check_ranges))
+    for file in source_files:
+        possible_ranges = need_ranges & file['ranges_complete']
+        if possible_ranges != II.empty():
+            check_ranges.append(possible_ranges)
+    logger.debug(' check ranges %s', len(check_ranges))
+
+    shifted_atomic_ranges = []
+    for ranges in check_ranges:
+        for atomic in ranges:
+            atomic = II.closed(atomic.lower - need_ranges.lower, atomic.upper-need_ranges.lower)
+            shifted_atomic_ranges.append(atomic)
+    logger.debug(' shifted atomic ranges %s', len(shifted_atomic_ranges))
+
+    for data_block in block_pool:
+        ranges = detect_non_zero_ranges_in_block (data_block)
+        for atomic in ranges:
+            atomic = II.closed(atomic.lower, atomic.upper)
+            shifted_atomic_ranges.append(atomic)
+    logger.debug(' shifted atomic ranges %s', len(shifted_atomic_ranges))
+
+    hammer_ranges = []
+    shifted_atomic_ranges = list(set(shifted_atomic_ranges))
+    while len(shifted_atomic_ranges) >0:
+        atomic0 = shifted_atomic_ranges.pop()
+        no_overlap = True
+        for atomic in reversed(shifted_atomic_ranges):
+            if atomic0 & atomic != II.empty():
+                no_overlap = False
+                shifted_atomic_ranges.remove(atomic)
+                for fission in [atomic0 - atomic, atomic - atomic0, atomic0 & atomic]:
+                    if fission != II.empty():
+                        for subatomic in fission:
+                            shifted_atomic_ranges.append(II.closed(subatomic.lower, subatomic.upper))
+                
+        if no_overlap:
+            hammer_ranges.append(atomic0)
+    print('\n')
+    hammer_ranges.sort(key = lambda x: x.lower)
+    logger.debug('got %s atomic ranges to work with', len(hammer_ranges))
+    logger.debug('block of %s split into %s',block_size,  len(hammer_ranges))
+    #print(hammer_ranges)
+
+    block_matrix = {}
+    # logger.debug('hammer ranges %s', hammer_ranges)
+    for atomic in hammer_ranges:
+        # logger.debug('atomic %s', atomic)
+        # logger.debug('block pool is %s', len(block_pool))
+        block_matrix[atomic] = []
+        for block in block_pool:
+            # logger.debug(block)
+            # logger.debug('block length %s', len(block))
+            new_atomic_block = block[atomic.lower:atomic.upper+1]
+            is_dupe = False
+            for existing_atomic_block in block_matrix[atomic]:
+                if np.array_equal(new_atomic_block, existing_atomic_block):
+                    is_dupe = True
+                    break
+            if not is_dupe:
+                block_matrix[atomic].append(new_atomic_block)
+
+    # logger.debug('block map')
+    variants = 1
+    for atomic in hammer_ranges:
+        variants *= len(block_matrix[atomic])
+        # print(f'range: {atomic} of {len(block_matrix[atomic])} variants')
+    logger.debug('Possible %s variants to hammer', variants)
         
+    counters = {}
+    test_range = II.empty()
+    # logger.debug('blocksize %s', block_size)
+    hammered_block = np.zeros(block_size, dtype=np.ubyte)
+    # logger.debug('hammering block of size %s', len(hammered_block))
+    for x in hammer_ranges:
+        counters[x]=0
+        test_range = test_range | x
+        hammered_block[x.lower:x.upper+1] = block_matrix[x][0]
+
+    # logger.debug('need %s hammer is %s', need_ranges, test_range)
+
+    is_shared_block = (blocknum == 0 and source_file['first_block_shared']) or \
+        (blocknum == len(source_file['piece_states'])
+         and source_file['last_block_shared'])
+    logger.debug('block %s , shared? %s', blocknum, is_shared_block)
 
 
-#def hammer_block(source_file, blocknum, source_files):
-    # hammer time
-    # possible_subs = {}
-    # counters = {}
-    # for ranges in need_ranges:
-    #     possible_subs[ranges] = []
-    #     counters[ranges] = 0
-    #     for file in all_files:
-    #         data = read_ranges(file, ranges)
-    #         possible_subs[ranges].append(data)
+    #check if long 0 patch exists
+    #if args.hammer.fail.quick
+    for atomic in hammer_ranges:
+        bm_a = block_matrix[atomic]
+        if len(bm_a) == 1 and len(bm_a[0] > 1000) and not np.any(bm_a[0]):
+            logger.debug('Big unavoidable chain of 0, quick skip')
+            #means there is unavoidable chain of 1000 zeros = most likely cant hammer
+            return False
 
-    # cnt_max = len(counters)
+    while True:
 
-    # while True:
-    #     for ranges in need_ranges:
-    #         block_data[ranges.lower:ranges.upper] = possible_subs[ranges][counters[ranges]]
+        if is_shared_block:
+            block_fixed = verify_block_shared(
+                source_file, blocknum=blocknum, block_data=hammered_block, source_files=source_files)
+            # logger.debug('Tried to verify SHARED block, result %s', block_fixed)
+        else:
+            block_fixed = verify_block(
+                source_file, blocknum=blocknum, block_data=hammered_block)
+            # print('verify ', block_fixed)
 
-    #     if is_shared_block:
-    #         block_fixed = verify_block_shared(
-    #             srf, blocknum=blocknum, block_data=block_data, source_files=source_files)
-    #     else:
-    #         block_fixed = verify_block(
-    #             srf, blocknum=blocknum, block_data=block_data)
+        if block_fixed:
+            print ('#########################')
+            logger.debug('block %s fixed', blocknum)
+            result = write_block(source_file, blocknum, hammered_block)
+            print ('#########################')
+            return result
 
-    #     if block_fixed:
-    #         logger.debug('block %s fixed', blocknum)
-    #         write_block(srf, blocknum, block_data)
-    #         return True
+        all_zeroed = True
+        for x in hammer_ranges:
+            print('.', end='')
+            counters[x]+=1
+            if counters[x] >= len(block_matrix[x]):
+                counters[x] = 0
+                hammered_block[x.lower:x.upper+1] = block_matrix[x][counters[x]]
+            else:
+                hammered_block[x.lower:x.upper+1] = block_matrix[x][counters[x]]
+                all_zeroed = False
+                break
 
-    #     for ranges in need_ranges:
-    #         counters[ranges] += 1
-    #         if counters[ranges] >= cnt_max:
-    #             counters[ranges] = 0
-    #         else:
-    #             break
+        if all_zeroed:
+            print()
+            break
 
-    #     counter_sum = 0
-    #     for ranges in need_ranges:
-    #         counter_sum += counters[ranges]
-    #     if counter_sum == 0:
-    #         break
-
+    logger.debug('looping complete hammer failed')
     return False
-
 
 def verify_block_shared(srf, blocknum, block_data, source_files):
     logger.debug('alternate verify')
@@ -448,46 +566,54 @@ def test_(file):
 
 
 def main():
-
     logger.info('Connecting to server')
     qbt_client = connect_qbt()
     args.qbt_client = qbt_client
-    logger.info('Retrieving torrent info - all files')
-
-    torrents = qbt_client.torrents_info(filter = 'resumed') #hashes=test_hashes)
-
+    logger.info('Retrieving torrent info')
+    if args.process_all:
+        torrents = qbt_client.torrents_info()
+    else:
+        torrents = qbt_client.torrents_info(filter = 'resumed')
+    # torrents = qbt_client.torrents_info(torrent_hashes=test_hashes)
+    
     logger.info('Got torrents')
+
+    dict_params = {
+        'tg_regex': args.tg_regex,
+        'filemax': 0,
+    }
+
     logger.info('construct file dict')
-    file_dict = construct_file_dict(torrents, filemax=0)
+    file_dict = construct_file_dict(torrents, dict_params)
     merge_list = find_files_to_merge(file_dict)
 
-    
-    print('groups: ', len(merge_list))
-    # print(merge_list)
+    print(f'groups: {len(merge_list)} of ', end ='')
+    for group in merge_list:
+        print(f'{len(group)} ', end='')
+    print('files')
+
     hashes = get_unique_hashes(merge_list)
     print('unique torrents', len(hashes))
     print(hashes)
-    #decision = input('Enter to start merging')
-    # print('pausing torrents')
-    # qbt_client.torrents_pause(hashes)
-
     print('Merge start')
 
+    hashes_to_recheck = []
     for group in merge_list:
         logger.debug('merging group of %s', len(group))
-        merge_multi(group)
-    # print('resuming torrents')
-    # qbt_client.torrents_resume(hashes)
-    # print('forcing rechecks')
-    # qbt_client.torrents_recheck(hashes)
-
-    # time.sleep(10)
+        result = merge_multi(group)
+        if result:
+            hashes_to_recheck.extend(result)
+        
+    print('resuming torrents')
+    qbt_client.torrents_resume(torrent_hashes = hashes_to_recheck)
+    print('forcing rechecks')
+    qbt_client.torrents_recheck(torrent_hashes = hashes_to_recheck)
 
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
     parser = ArgumentParser(
-        description='delete active torrents automagically if other copy is completed.')
+        description='hammer till they finish')
 
     parser.add_argument('-all', dest='process_all', default=False, action='store_true',
                         help='Inject into paused files too, default false')
@@ -502,10 +628,11 @@ if __name__ == "__main__":
                         help='Check if any new blocks appeared')
 
     parser.add_argument('-debug', dest='debug', action='store_true')
-    parser.add_argument('-yy', dest='auto_yes',
-                        action='store_true', help='auto yes all')
-    parser.add_argument('-dummy', dest='allow_dummies', default=False,
-                        action='store_true', help='allow creation of empty files')
+
+    parser.add_argument('-tg_regex', dest='tg_regex', default='', type=str)
+
+    parser.add_argument('-auto', action='store_true')
+
 
     args = parser.parse_args()
 

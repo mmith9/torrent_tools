@@ -32,11 +32,14 @@ def filter_no_pieces(torrents):
     return gots_pieces
 
 
-def construct_file_dict(torrents, filemax=0):
-    regex = config.get('behaviour','nono_regex')
+def construct_file_dict(torrents, dict_params):
+    reg_exclude = config.get('behaviour','nono_regex')
+    reg_targets = dict_params['tg_regex']
+    filemax = dict_params['filemax']
 
     torrents = filter_no_meta(torrents)
     file_dict_raw = {}
+    targets = []
     logger.info('Processing %s torrents', len(torrents))
     logger.info('Sorting by size')
     count_files = 0
@@ -47,7 +50,7 @@ def construct_file_dict(torrents, filemax=0):
         file_offset = 0
 
         if filemax and count_files >= filemax:
-          # logger.debug('filemax of %s hit', filemax)
+            logger.debug('filemax of %s hit', filemax)
             break
 
         for file in trr.files:
@@ -56,37 +59,43 @@ def construct_file_dict(torrents, filemax=0):
             print('.', end='')
 
             skip = False
-            skip = skip or file.priority == 0
+            #skip = skip or file.priority == 0
             skip = skip or size < min_file_size
-            matching = re.search(regex, file.name)
-            if matching:
-                logger.warning('skipping archives %s', file.name)
-                skip = True
-
+            skip = skip or re.search(reg_exclude, file.name)
             if skip:
                 file_offset += size
                 continue
 
             insert = (trr, file, file_offset)
+            if reg_targets:
+                if re.search(reg_targets, file.name):
+                    targets.append(insert)
 
             if size not in file_dict_raw:
                 file_dict_raw[size] = []
+
             file_dict_raw[size].append(insert)
             file_offset += size
     print()
-    return construct_file_dict_raw_part2(file_dict_raw)
+    return construct_file_dict_raw_part2(file_dict_raw, targets)
 
-
-def construct_file_dict_raw_part2(file_dict_raw):
-
+def construct_file_dict_raw_part2(file_dict_raw, targets):
     logger.info('Grouping by size, %s sizes', len(file_dict_raw))
     file_dict = {}
 
+    target_sizes = set()
+    for _ , file, _ in targets:
+        target_sizes.add(file.size)
+
+    logger.debug('looking for size %s', target_sizes)
     for size, group in file_dict_raw.items():
         print('.', end = '')
+        if target_sizes and size not in target_sizes:
+            continue
         if len(group) < 2:
             continue
         # print(f'\n{size}', end='')
+
         file_dict[size] = []
         for trr, file, file_offset in group:
             print('.', end='')
@@ -95,7 +104,6 @@ def construct_file_dict_raw_part2(file_dict_raw):
                 file_is_complete = file.progress == 1
                 complete_file_exists = os.path.isfile(full_path_client)
                 incomplete_file_exists = os.path.isfile(full_path_client + '.!qB')
-
 
                 # print(f't{trr.hash[:4]}f{file["id"]}')
                 if not file_is_complete and complete_file_exists:

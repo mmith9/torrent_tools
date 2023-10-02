@@ -202,7 +202,6 @@ def verify_block(file, blocknum, block_data=None, data_source_file=None):
 
 
 def recheck_file(file, full_check=False):
-    logger.debug('----- RECHECK -----')
   # logger.debug('looking for>%s>%s', file['debug'], file['filename'])
   # logger.debug('offset %s blocksize %s', file['piece_offset'], size_to_dib(file['piece_size']))
 
