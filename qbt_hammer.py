@@ -78,6 +78,14 @@ def ask_user(question, choices):
     return answer
 
 def quick_fix_files(files):
+    files_exist = 0
+    for file in files:
+        if file['file_exists']:
+            files_exist+=1
+    if files_exist <=1:
+        logger.debug('Only one phys file in group: \n%s', file['filename'])
+        return False
+
     files.sort(key= lambda x: x['progress'], reverse = True)
     file = files[0]
     if file['progress'] == 1:
@@ -100,42 +108,49 @@ def quick_fix_files(files):
     elif not args.auto and ask_user('Repair?', ['y','n']) == 'n':
         return
 
-    blocks_fixed = 0
+    num_blocks_fixed = 0
+    blocks_fixed = []
     for blocknum, status in enumerate(file['piece_states']):
         if status != 2:
             rebuilt = rebuild_block(file, blocknum, files[1:])
             if rebuilt:
-                blocks_fixed +=1
+                blocks_fixed.append(blocknum)
+                num_blocks_fixed +=1
                 print('O', end='')
             else:
                 print('.', end='')
         else:
             print('o', end='')
     print('\n')
-    print('blocks fixed:', blocks_fixed)
+    print('blocks fixed:', num_blocks_fixed)
 
     if args.auto:
         if not args.hammer:
             return
-        if file['progress'] < 0.7:
-            return
+        # if file['progress'] < 0.5:
+        #     return
 
     elif not args.auto and ask_user('hammer file?', ['y', 'n']) == 'n':
         return
 
-    blocks_hammered = 0
+    num_blocks_hammered = 0
+    blocks_hammered = []
     for blocknum, status in enumerate(file['piece_states']):
+        if blocknum in blocks_fixed:
+            print('O', end='')
+            continue
         if status != 2:
             rebuilt = hammer_block(file, blocknum, files[1:])
             if rebuilt:
-                blocks_hammered +=1
-                print('O', end='')
+                blocks_hammered.append(blocknum)
+                num_blocks_hammered +=1
+                print('T', end='')
             else:
                 print('.', end='')
         else:
             print('o', end='')
     print('\n')
-    print('blocks fixed:', blocks_hammered)
+    print('blocks fixed:', num_blocks_hammered)
 
  
 
@@ -360,8 +375,8 @@ def detect_non_zero_ranges_in_block(data):
 
 
 def hammer_block(source_file, blocknum, source_files):
-    logger.debug('------- block --------- ')
-    logger.debug('blocknum %s', blocknum)
+  # logger.debug('------- block --------- ')
+    # logger.debug('blocknum %s', blocknum)
     all_files = []
     all_files.append(source_file)
     all_files.extend(source_files)
@@ -376,26 +391,26 @@ def hammer_block(source_file, blocknum, source_files):
             block_pool.append(block)
 
     check_ranges = [need_ranges]
-    logger.debug(' check ranges %s', len(check_ranges))
+    # logger.debug(' check ranges %s', len(check_ranges))
     for file in source_files:
         possible_ranges = need_ranges & file['ranges_complete']
         if possible_ranges != II.empty():
             check_ranges.append(possible_ranges)
-    logger.debug(' check ranges %s', len(check_ranges))
+    # logger.debug(' check ranges %s', len(check_ranges))
 
     shifted_atomic_ranges = []
     for ranges in check_ranges:
         for atomic in ranges:
             atomic = II.closed(atomic.lower - need_ranges.lower, atomic.upper-need_ranges.lower)
             shifted_atomic_ranges.append(atomic)
-    logger.debug(' shifted atomic ranges %s', len(shifted_atomic_ranges))
+    # logger.debug(' shifted atomic ranges %s', len(shifted_atomic_ranges))
 
     for data_block in block_pool:
         ranges = detect_non_zero_ranges_in_block (data_block)
         for atomic in ranges:
             atomic = II.closed(atomic.lower, atomic.upper)
             shifted_atomic_ranges.append(atomic)
-    logger.debug(' shifted atomic ranges %s', len(shifted_atomic_ranges))
+    # logger.debug(' shifted atomic ranges %s', len(shifted_atomic_ranges))
 
     hammer_ranges = []
     shifted_atomic_ranges = list(set(shifted_atomic_ranges))
@@ -410,13 +425,12 @@ def hammer_block(source_file, blocknum, source_files):
                     if fission != II.empty():
                         for subatomic in fission:
                             shifted_atomic_ranges.append(II.closed(subatomic.lower, subatomic.upper))
-                
         if no_overlap:
             hammer_ranges.append(atomic0)
-    print('\n')
+    # print('\n')
     hammer_ranges.sort(key = lambda x: x.lower)
-    logger.debug('got %s atomic ranges to work with', len(hammer_ranges))
-    logger.debug('block of %s split into %s',block_size,  len(hammer_ranges))
+    # logger.debug('got %s atomic ranges to work with', len(hammer_ranges))
+    # logger.debug('block of %s split into %s',block_size,  len(hammer_ranges))
     #print(hammer_ranges)
 
     block_matrix = {}
@@ -442,7 +456,11 @@ def hammer_block(source_file, blocknum, source_files):
     for atomic in hammer_ranges:
         variants *= len(block_matrix[atomic])
         # print(f'range: {atomic} of {len(block_matrix[atomic])} variants')
-    logger.debug('Possible %s variants to hammer', variants)
+    if variants == 1:
+        # logger.debug('only 1 variant,, bailing')
+        return False
+
+  # logger.debug('Possible %s variants to hammer', variants)
         
     counters = {}
     test_range = II.empty()
@@ -459,7 +477,7 @@ def hammer_block(source_file, blocknum, source_files):
     is_shared_block = (blocknum == 0 and source_file['first_block_shared']) or \
         (blocknum == len(source_file['piece_states'])
          and source_file['last_block_shared'])
-    logger.debug('block %s , shared? %s', blocknum, is_shared_block)
+  # logger.debug('block %s , shared? %s', blocknum, is_shared_block)
 
 
     #check if long 0 patch exists
@@ -467,7 +485,7 @@ def hammer_block(source_file, blocknum, source_files):
     for atomic in hammer_ranges:
         bm_a = block_matrix[atomic]
         if len(bm_a) == 1 and len(bm_a[0] > 1000) and not np.any(bm_a[0]):
-            logger.debug('Big unavoidable chain of 0, quick skip')
+          # logger.debug('Big unavoidable chain of 0, quick skip')
             #means there is unavoidable chain of 1000 zeros = most likely cant hammer
             return False
 
@@ -476,7 +494,7 @@ def hammer_block(source_file, blocknum, source_files):
         if is_shared_block:
             block_fixed = verify_block_shared(
                 source_file, blocknum=blocknum, block_data=hammered_block, source_files=source_files)
-            # logger.debug('Tried to verify SHARED block, result %s', block_fixed)
+            logger.debug('Tried to verify SHARED block, result %s', block_fixed)
         else:
             block_fixed = verify_block(
                 source_file, blocknum=blocknum, block_data=hammered_block)
@@ -505,7 +523,7 @@ def hammer_block(source_file, blocknum, source_files):
             print()
             break
 
-    logger.debug('looping complete hammer failed')
+  # logger.debug('looping complete hammer failed')
     return False
 
 def verify_block_shared(srf, blocknum, block_data, source_files):

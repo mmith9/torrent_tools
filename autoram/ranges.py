@@ -1,6 +1,8 @@
 import configparser
 import portion as P
 import logging
+import numpy as np
+
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)

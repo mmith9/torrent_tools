@@ -148,7 +148,7 @@ def construct_file_dict_raw_part2(file_dict_raw, targets):
 
             is_last_block_shared = (file_offset + file.size != trr.size) and \
                 (((file_offset + file.size + 1) % piece_size) != 0)
-            pieces_offset = -(file_offset % trr.properties.piece_size)
+            #pieces_offset = -(file_offset % trr.properties.piece_size)
             insert = {'file': file,
                       'torrent': trr,
                       'id': file['id'],
