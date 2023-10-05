@@ -1,22 +1,22 @@
 #!/usr/bin/env python -u
 
 import configparser
-import hashlib
 import logging
 import logging.config
 import os
+import shutil
 import time
 
 import numpy as np
 
-
+from autoram.files_on_disk import (read_ranges, verify_and_fix_physical_file,
+                                   verify_block, write_block)
 from autoram.qbt_api import connect_qbt
-from autoram.tr_payload import construct_file_dict
-from autoram.ranges import II, get_block_ranges, estimate_gain_from_repair, shift_ranges, sum_ranges, size_to_dib
+from autoram.ranges import (II, estimate_gain_from_repair, get_block_ranges,
+                            shift_ranges, size_to_dib, sum_ranges)
 from autoram.test_hashes import test_hashes
-from autoram.files_on_disk import verify_and_fix_physical_file
-from autoram.files_on_disk import read_block, read_ranges, write_block,\
-    verify_block, recheck_file, swap_files_inplace
+from autoram.tr_payload import (construct_file_dict, is_file_unique_to_group,
+                                match_same_size_files_multi)
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
@@ -30,10 +30,6 @@ def merge_multi(files):
     hashes = []
     for file in files:
         hashes.append(file['torrent'].hash)
-        if file['file'].size != files[0]['file'].size:
-            logger.error('final file sizes mismatch %s %s',
-                         files[0]['file'].size, file['file'].size)
-            return False
 
     all_paused = False
     t_start = time.time()
@@ -65,9 +61,10 @@ def merge_multi(files):
             time.sleep(5)
 
     for file in files:
-        if not verify_and_fix_physical_file(file):
-            # logger.debug('verify size failed')
-            return False
+        if file['file_exists']:
+            if not verify_and_fix_physical_file(file):
+                # logger.debug('verify size failed')
+                return False
 
     return merge_multi_ready(files)
 
@@ -80,158 +77,82 @@ def ask_user(question, choices):
 
 
 def merge_multi_ready(files):
-    files_exist = 0
+    existing_files = []
+    empty_files = []
+    unique_files = []
     for file in files:
+        if file['progress'] == 1:
+            logger.info(
+                'There is allready a complete file in group: \n%s', file['filename'])
+            return False
+        if not is_file_unique_to_group(file, unique_files):
+            continue
+        unique_files.append(file)
         if file['file_exists']:
-            files_exist += 1
-    if files_exist <=1:
-        print('phys file in group: {files_exist} in group {files[0]["filename"]}')
-        return False
-
-    files.sort(key=lambda x: x['progress'], reverse=True)
-    file = files[0]
-    if file['progress'] == 1:
-        logger.info(
-            'There is allready a complete file in group: \n%s', file['filename'])
-        return False
-
-    infohash = file['torrent'].hash
-    print('Trying ', file['filename'])
-    print('copies:')
-    for copy in files[1:]:
-        print(copy['filename'])
-
-    est_gain, est_left = estimate_gain_from_repair(file, files[1:])
-    est_gain_bytes = sum_ranges(est_gain)
-    est_left_bytes = sum_ranges(est_left)
-    print('estimated gain', size_to_dib(est_gain_bytes))
-    print('estimated left', size_to_dib(est_left_bytes))
-
-    if args.auto and est_gain_bytes == 0:
-        return False
-    elif not args.auto and ask_user('Repair?', ['y', 'n']) == 'n':
-        return False
-
-    num_blocks_fixed = 0
-    blocks_fixed = []
-    for blocknum, status in enumerate(file['piece_states']):
-        if status != 2:
-            rebuilt = rebuild_block(file, blocknum, files[1:])
-            if rebuilt:
-                blocks_fixed.append(blocknum)
-                num_blocks_fixed += 1
-                print('O', end='')
-            else:
-                print('.', end='')
+            existing_files.append(file)
         else:
-            print('o', end='')
-    print('\n')
-    print('blocks fixed:', num_blocks_fixed)
+            empty_files.append(file)
+
+    existing_files.sort(key=lambda x: x['progress'], reverse=True)
+    file0 = existing_files[0]
+
+    infohash = file0['hash']
+    print(f"Parent {size_to_dib(file0['size'])} \n{file0['filename']}")
+    print('copies :')
+    for file in unique_files:
+        if file == file0:
+            continue
+        if file in existing_files:
+            print(file['filename'])
+        else:
+            print('(nofile)', file['filename'])
+
+    blocks_fixed = []
+    if len(existing_files) > 1:
+        blocks_fixed = loop_rebuild_block(file0, existing_files[1:])
+
+    end_now = False
+    if len(existing_files) > 1:
+        if args.auto:
+            if not args.hammer and not args.hardmerge:
+                end_now = True
+        elif not args.auto and ask_user('hammer file?', ['y', 'n']) == 'n':
+            end_now = True
+    else:
+        if not args.hardmerge:
+            end_now = True
+    if end_now:
+        if len(blocks_fixed) > 0:
+            return [infohash]
+        else:
+            return False
+
+    blocks_hammered = []
+    if len(existing_files) > 1:
+        blocks_hammered = loop_hammer_block(
+            file0, existing_files[1:], blocks_fixed)
 
     end_now = False
     if args.auto:
-        if not args.hammer:
+        if not args.hardmerge:
             end_now = True
-
-    elif not args.auto and ask_user('hammer file?', ['y', 'n']) == 'n':
+    elif not args.auto and ask_user('hardmerge file?', ['y', 'n']) == 'n':
         end_now = True
-
     if end_now:
-        if num_blocks_fixed > 0:
-            return infohash
+        if len(blocks_fixed) + len(blocks_hammered) > 0:
+            return [infohash]
         else:
             return False
 
-    num_blocks_hammered = 0
-    blocks_hammered = []
-    for blocknum, status in enumerate(file['piece_states']):
-        if blocknum in blocks_fixed:
-            print('O', end='')
-            continue
-        if status != 2:
-            rebuilt = hammer_block(file, blocknum, files[1:])
-            if rebuilt:
-                blocks_hammered.append(blocknum)
-                num_blocks_hammered += 1
-                print('T', end='')
-            else:
-                print('.', end='')
+    result = hard_merge(file0, unique_files)
+    if result or len(blocks_fixed) + len(blocks_hammered) > 0:
+        if result:
+            result.append(infohash)
+            return result
         else:
-            print('o', end='')
-    print('\n')
-    print('blocks hammered:', num_blocks_hammered)
-    if num_blocks_fixed + num_blocks_hammered > 0:
-        return infohash
+            return [infohash]
     else:
         return False
-
-def find_blocks_in_other_file(file1, file2):
-    # logger.debug('looking for >%s>%s', file1['debug'], file1['filename'])
-    # logger.debug('offset %s blocksize %s', file1['file_offset'], size_to_dib(file1['piece_size']))
-    # logger.debug('in         >%s>%s', file2['debug'], file2['filename'])
-    # logger.debug('offset %s blocksize %s', file2['file_offset'], size_to_dib(file2['piece_size']))
-
-    if not os.path.isfile(file2['full_path_client']):
-      # logger.debug('file2 not found')
-        return False
-
-    ranges = file2['ranges_complete']
-
-    # logger.debug('got %s ranges', len(ranges))
-    if not ranges:
-        # logger.debug('ranges empty')
-        return False
-
-    piece_size = file1['piece_size']
-    file_offset = file1['file_offset']
-    pieces_offset = -(file_offset % piece_size)
-
-    pieces_start = file1['pieces_start']
-    torrent_hashes = file1['torrent'].piece_hashes
-
-    blocknum = 0
-    if pieces_offset < 0:
-        blocknum = 1
-
-    blocks_found = 0
-    tries = 0
-    max_tries = 10
-    while (blocknum+1)*piece_size + pieces_offset < file1['size']:
-        if tries >= max_tries:
-          # logger.debug('Failed %s times, skipping', max_tries)
-            return False
-
-        byte_start = blocknum*piece_size + pieces_offset
-        byte_end = (blocknum+1)*piece_size + pieces_offset
-
-        block_range = II.closedopen(byte_start, byte_end)
-        if block_range not in ranges:
-            blocknum += 1
-            continue
-
-        hash1 = torrent_hashes[blocknum + pieces_start]
-        # logger.debug('%s hash read %s', hash1, blocknum + pieces_start)
-
-        try:
-            with open(file2['full_path_client'], 'rb') as fh:
-                fh.seek(byte_start)
-                piece_data = fh.read(piece_size)
-                hash2 = hashlib.sha1(piece_data).hexdigest()
-            # logger.debug('%s computed: %s', hash2, blocknum)
-        except Exception as err:
-            logger.error(err)
-            tries += 1
-            time.sleep(5)
-            continue
-
-        blocknum += 1
-        if hash1.lower() == hash2.lower():
-            blocks_found += 1
-        else:
-            tries += 1
-        if blocks_found >= 3:
-            return True
-    return False
 
 
 def find_files_to_merge(file_dict):
@@ -239,10 +160,12 @@ def find_files_to_merge(file_dict):
     groups_total = len(file_dict)
     count = 0
     group_limit = config.getint('behaviour', 'group_limit')
+    logger.info('found %s size groups', groups_total)
     for _, files in file_dict.items():
         count += 1
-        print(f'{count}/{groups_total} ', end='')
+        print(f'{count}', end='   \r')
         if len(files) > group_limit:
+            print()
             logger.debug(
                 'skipping group of size %s too many files', files[0]['size'])
             continue
@@ -253,56 +176,17 @@ def find_files_to_merge(file_dict):
         groups_to_merge = match_same_size_files_multi(files)
         merge_list.extend(groups_to_merge)
 
-    return merge_list
-
-
-def file_belongs_to_group(file0, group):
-    for file in group:
-        if find_blocks_in_other_file(file0, file):
-            return True
-        if find_blocks_in_other_file(file, file0):
-            return True
-    return False
-
-
-def match_same_size_files_multi(files_of_same_size):
-    files = files_of_same_size
-    logger.debug('matching %s files of size %s', len(files), files[0]['size'])
-    files.sort(key=lambda x: x['progress'])
-    size = files[0]['size']
-    groups = []
-
-    while len(files) >= 1:
-        file = files.pop()
-        for group in groups:
-            if file_belongs_to_group(file, group):
-                group.append(file)
-                file = None
-                break
-        if file:
-            groups.append([file])
-
-    if config.get('behaviour', 'hammer_matching').lower() != 'true':
-        return groups
-
-    logger.debug('trying to match harder')
-    # try again, first recoup unassigned files
-    assert files == []
-    for group in reversed(groups):
-        if len(group) == 1:
-            files.append(group.pop())
-            groups.remove(group)
-
-    files.sort(key=lambda x: x['piece_size'])
-    while len(files) >= 1:
-        file = files.pop()
-        for group in groups:
-            if file_belongs_to_group(file, group):
-                group.append(file)
-                break
-
-    logger.debug('grouping of %s done, groups found %s', size, len(groups))
-    return groups
+    filtered_merge_list = []
+    for group in merge_list:
+        new_group = []
+        for file in group:
+            if is_file_unique_to_group(file, new_group):
+                new_group.append(file)
+        if len(new_group) >1:
+            filtered_merge_list.append(new_group)
+    print()
+    logger.info('Got %s groups to work with', len(filtered_merge_list))
+    return filtered_merge_list
 
 
 def get_unique_hashes(merge_list):
@@ -311,6 +195,38 @@ def get_unique_hashes(merge_list):
         for file in group:
             hashes.add(file['torrent'].hash)
     return list(hashes)
+
+
+def loop_rebuild_block(file0, files):
+
+    blocks_fixed = []
+    est_gain, est_left = estimate_gain_from_repair(file0, files)
+    est_gain_bytes = sum_ranges(est_gain)
+    est_left_bytes = sum_ranges(est_left)
+    print('estimated gain', size_to_dib(est_gain_bytes))
+    print('estimated left', size_to_dib(est_left_bytes))
+
+    if args.auto and est_gain_bytes == 0:
+        return blocks_fixed
+    elif not args.auto and ask_user('Repair?', ['y', 'n']) == 'n':
+        return blocks_fixed
+
+    num_blocks_fixed = 0
+
+    for blocknum, status in enumerate(file0['piece_states']):
+        if status != 2:
+            rebuilt = rebuild_block(file0, blocknum, files)
+            if rebuilt:
+                blocks_fixed.append(blocknum)
+                num_blocks_fixed += 1
+                print('O', end='')
+            else:
+                print('.', end='')
+        else:
+            print('o', end='')
+    print('\n')
+    print('blocks fixed:', num_blocks_fixed)
+    return blocks_fixed
 
 
 def rebuild_block(source_file, blocknum, source_files):
@@ -329,7 +245,8 @@ def rebuild_block(source_file, blocknum, source_files):
         # print(file['ranges_complete'])
         usable_ranges = need_ranges & file['ranges_complete']
         rebuild_ranges = rebuild_ranges | usable_ranges
-        # logger.debug('file %s, need %s, usable %s, rebuild %s',file['debug'] , need_ranges, usable_ranges, rebuild_ranges)
+        # logger.debug('file %s, need %s, usable %s, rebuild %s',file['debug']\
+        #  , need_ranges, usable_ranges, rebuild_ranges)
         # if blocknum !=0 and file!=source_file:
         #     xx = verify_block(source_file, blocknum, data_source_file=file)
         #     print(file['debug'],xx)
@@ -371,6 +288,7 @@ def rebuild_block(source_file, blocknum, source_files):
         # logger.debug('block %s fixed', blocknum)
         return write_block(source_file, blocknum, block_data)
 
+
 def detect_non_zero_ranges_in_block(data, max_subblock_size):
     # print('`',len(data), end='')
     if not np.any(data):
@@ -386,6 +304,28 @@ def detect_non_zero_ranges_in_block(data, max_subblock_size):
     r2 = detect_non_zero_ranges_in_block(data[half:], max_subblock_size)
     r2 = shift_ranges(r2, half)
     return r1 | r2
+
+
+def loop_hammer_block(file0, files, blocks_fixed):
+    num_blocks_hammered = 0
+    blocks_hammered = []
+    for blocknum, status in enumerate(file0['piece_states']):
+        if blocknum in blocks_fixed:
+            print('O', end='')
+            continue
+        if status != 2:
+            rebuilt = hammer_block(file0, blocknum, files)
+            if rebuilt:
+                blocks_hammered.append(blocknum)
+                num_blocks_hammered += 1
+                print('T', end='')
+            else:
+                print('.', end='')
+        else:
+            print('o', end='')
+    print('\n')
+    print('blocks hammered:', num_blocks_hammered)
+    return blocks_hammered
 
 
 def hammer_block(source_file, blocknum, source_files):
@@ -605,12 +545,61 @@ def verify_block_shared(srf, blocknum, block_data, source_files):
     return False
 
 
-def test_(file):
-    print('testing ', file['debug'], file['pieces_offset'])
-    for num, status in enumerate(file['pieces_stats']):
-        print(status, end='')
-        print(verify_block(file, num), end=' ')
-    print()
+def hard_merge(file0, all_files):
+    time_now = int(time.time())
+    logger.debug('hard merging %s files to %s',
+                 len(all_files)-1, file0['filename'])
+
+    hashes_to_recheck = []
+    # point torrents to parent and stash obsolete files in autoram dir
+    for file in all_files:
+        if file == file0:
+            continue
+
+        if file['file_exists']:
+            logger.debug('moving %s to', file['filename'])
+            new_path_client = os.path.join(
+                config['client']['backup_dir'], file['hash'])
+            new_path_client = os.path.join(new_path_client, file['filename'])
+            logger.debug(new_path_client)
+
+            dir_to_make, _ = os.path.split(new_path_client)
+            os.makedirs(dir_to_make, exist_ok=True)
+            shutil.move(file['full_path_client'], new_path_client)
+            logger.debug('file moved')
+
+            with open(
+                os.path.join(config['client']['backup_dir'],
+                             f'log_{time_now}.txt'), 'a', encoding='utf-8') as fh:
+
+                fh.writelines(f'''
+---------
+epoch: {int(time.time())}
+hash1: {file['hash']}
+torrent1: {file['torrent'].name}
+file1: {file['filename']}
+old path: {file['full_path_client']}
+new path: {new_path_client}
+dest: {file0['filename']}
+
+        ''')
+
+        logger.info('Renaming file in qbittorrent')
+        args.qbt_client.torrents_rename_file(
+            torrent_hash=file['hash'], file_id=file['id'],
+            old_path=file['path_server'],
+            new_path=file0['path_server']
+        )
+
+        args.qbt_client.torrents_add_tags(
+            torrent_hashes=file['hash'], tags='_ram_clone')
+        hashes_to_recheck.append(file['hash'])
+
+    args.qbt_client.torrents_add_tags(
+        torrent_hashes=file0['hash'], tags='_ram_parent')
+    hashes_to_recheck.append(file0['hash'])
+
+    return hashes_to_recheck
 
 
 def main():
@@ -638,7 +627,7 @@ def main():
     print(f'groups: {len(merge_list)} of ', end='')
     for group in merge_list:
         print(f'{len(group)} ', end='')
-    print('files')
+    print('\nfiles')
 
     hashes = get_unique_hashes(merge_list)
     print('unique torrents', len(hashes))
@@ -647,10 +636,13 @@ def main():
 
     hashes_to_recheck = []
     for group in merge_list:
+        if len(group) <= 1:
+            continue
+
         logger.debug('merging group of %s', len(group))
         result = merge_multi(group)
         if result:
-            hashes_to_recheck.append(result)
+            hashes_to_recheck.extend(result)
 
     print('resuming torrents')
     qbt_client.torrents_resume(torrent_hashes=hashes_to_recheck)

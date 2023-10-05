@@ -8,7 +8,8 @@ import os
 import shutil
 
 import numpy as np
-from autoram.ranges import II, get_block_ranges
+
+from autoram.ranges import get_block_ranges
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
@@ -61,14 +62,8 @@ def extend_file(full_path_client, desired_size):
 
 
 def verify_and_fix_physical_file(file):
-    path = file['full_path_client']
     # logger.debug('Checking phys file %s>%s', file['debug'], path)
     try:
-        if not os.path.isfile(path):
-            file['dummy'] = 'dummy'
-            # logger.debug('dummy file found: %s', file['debug'])
-            return True
-        file['dummy'] = 'real'
         f_size = os.path.getsize(file['full_path_client'])
     except Exception as err:
         logger.error(err)
@@ -227,10 +222,11 @@ def recheck_file(file, full_check=False):
                     new_bad_blocks += 1
                     print('!', end='')
                 else:
-                    bad_blocks+=1
+                    bad_blocks += 1
                     print('.', end='')
         print()
-        print(f'{good_blocks} good {new_good_blocks} NEW good, blocks out of {all_blocks} total')
+        print(
+            f'{good_blocks} good {new_good_blocks} NEW good, blocks out of {all_blocks} total')
         print(f'and {new_bad_blocks} that were good are actuall bad')
     else:
 
@@ -244,12 +240,12 @@ def recheck_file(file, full_check=False):
                     new_good_blocks += 1
                     print('O', end='')
                 else:
-                    bad_blocks+=1
+                    bad_blocks += 1
                     print('.', end='')
         print()
         print(
             f'{good_blocks} good , {new_good_blocks} NEW good blocks out of {all_blocks} total'
-            )
+        )
 
     return (good_blocks, new_good_blocks, bad_blocks, new_bad_blocks)
 
