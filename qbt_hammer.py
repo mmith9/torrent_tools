@@ -84,7 +84,7 @@ def merge_multi_ready(files):
         if file['progress'] == 1:
             logger.info(
                 'There is allready a complete file in group: \n%s', file['filename'])
-            return False
+            # return False
         if not is_file_unique_to_group(file, unique_files):
             continue
         unique_files.append(file)

@@ -9,7 +9,7 @@ import shutil
 
 import numpy as np
 
-from autoram.ranges import get_block_ranges
+from autoram.ranges import get_block_ranges, size_to_dib
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
@@ -197,11 +197,11 @@ def verify_block(file, blocknum, block_data=None, data_source_file=None):
 
 
 def recheck_file(file, full_check=False):
-  # logger.debug('looking for>%s>%s', file['debug'], file['filename'])
-  # logger.debug('offset %s blocksize %s', file['piece_offset'], size_to_dib(file['piece_size']))
+    logger.debug('looking for>%s>%s', file['debug'], file['filename'])
+    logger.debug('offset %s blocksize %s', file['pieces_offset'], size_to_dib(file['piece_size']))
 
     if not os.path.isfile(file['full_path_client']):
-      # logger.debug('file to recheck not found')
+        logger.debug('file to recheck not found')
         return False
     good_blocks = 0
     new_good_blocks = 0
@@ -302,3 +302,64 @@ def copy_ranges_max(target, source, ranges):
 
                     bytes_left -= buffersize
                     src_file_pos += buffersize
+
+
+def recheck_file_full(file):
+    good_blocks = 0
+    new_good_blocks = 0
+    new_bad_blocks = 0
+    bad_blocks = 0
+    all_blocks = len(file['piece_states'])
+
+    logger.debug('looking for>%s>%s', file['debug'], file['filename'])
+    logger.debug('offset %s blocksize %s blocks %s', file['pieces_offset'], size_to_dib(file['piece_size']), all_blocks)
+
+    if not os.path.isfile(file['full_path_client']):
+        logger.debug('file to recheck not found')
+        return False
+
+    file_path = file['full_path_client']
+    piece_size = file['piece_size']
+    offset = file['pieces_offset']
+    file_size = file['size']
+    piece_states = file['piece_states']
+    blocknum = 0 if offset == 0 else 1
+    
+    try:
+        with open(file_path, 'rb') as fh:
+            fh.seek(blocknum*piece_size + offset)
+
+            while blocknum*piece_size + offset < file_size:
+
+                block_data = fh.read(piece_size)
+                block_state = piece_states[blocknum]
+
+                hash_computed = hashlib.sha1(block_data).hexdigest()
+                hash_read = file['torrent'].piece_hashes[blocknum + file['pieces_start']]
+                new_block_state = (hash_read.lower() == hash_computed.lower())                
+
+                if new_block_state:
+                    good_blocks += 1
+                    if block_state == 0:
+                        new_good_blocks += 1
+                        print('O', end='')
+                    else:
+                        print('o', end='')
+                else:
+                    if block_state == 2:
+                        new_bad_blocks += 1
+                        print('!', end='')
+                    else:
+                        bad_blocks += 1
+                        print('.', end='')
+                blocknum +=1
+
+    except Exception as err:
+        logger.error('error rechecking whole file %s', err)
+        return False
+
+    print()
+    print(
+        f'{good_blocks} good {new_good_blocks} NEW good, blocks out of {all_blocks} total')
+    print(f'and {new_bad_blocks} that were good are actuall bad')
+    return (good_blocks, new_good_blocks, bad_blocks, new_bad_blocks)

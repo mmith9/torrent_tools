@@ -36,7 +36,7 @@ def estimate_gain_from_repair(target_file, src_files):
 def size_to_dib(size):
     index = 0
     new_size = int(size / 1024)
-    while new_size > 1024:
+    while new_size >= 1024:
         new_size = int(new_size / 1024)
         index += 1
     new_size = str(new_size) + [' KiB', ' MiB', ' GiB', ' TiB'][index]
