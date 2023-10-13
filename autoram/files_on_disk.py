@@ -6,7 +6,7 @@ import logging
 import logging.config
 import os
 import shutil
-
+import io
 import numpy as np
 
 from autoram.ranges import get_block_ranges, size_to_dib
@@ -304,7 +304,13 @@ def copy_ranges_max(target, source, ranges):
                     src_file_pos += buffersize
 
 
-def recheck_file_full(file):
+def recheck_file_full(file, client=False):
+
+    if client:
+        hashes = client.torrents_piece_hashes(torrent_hash=file['hash'])
+    else:
+        hashes = file['torrent'].piece_hashes
+
     good_blocks = 0
     new_good_blocks = 0
     new_bad_blocks = 0
@@ -326,16 +332,22 @@ def recheck_file_full(file):
     blocknum = 0 if offset == 0 else 1
     
     try:
-        with open(file_path, 'rb') as fh:
-            fh.seek(blocknum*piece_size + offset)
+        with io.open(file_path, 'rb' ) as fh:
+
+            fi = io.FileIO(fh.fileno())
+            fb = io.BufferedReader(fi, buffer_size=file_size)
+            fb.seek(blocknum*piece_size + offset)
+
+            # fh.seek(blocknum*piece_size + offset)
 
             while blocknum*piece_size + offset < file_size:
 
-                block_data = fh.read(piece_size)
+                block_data = fb.read(piece_size)
+                # block_data = fh.read(piece_size)
                 block_state = piece_states[blocknum]
 
                 hash_computed = hashlib.sha1(block_data).hexdigest()
-                hash_read = file['torrent'].piece_hashes[blocknum + file['pieces_start']]
+                hash_read = hashes[blocknum + file['pieces_start']]
                 new_block_state = (hash_read.lower() == hash_computed.lower())                
 
                 if new_block_state:
@@ -363,3 +375,11 @@ def recheck_file_full(file):
         f'{good_blocks} good {new_good_blocks} NEW good, blocks out of {all_blocks} total')
     print(f'and {new_bad_blocks} that were good are actuall bad')
     return (good_blocks, new_good_blocks, bad_blocks, new_bad_blocks)
+
+
+# #file descriptor is obtained by making using of FileIO which is used to identify the file that is opened
+#     	fi  = io.FileIO(file.fileno())
+#     	#Buffered reader is then used to read the contents of the file
+#     	fb = io.BufferedReader(fi)
+#     	#the contents of the file is printed
+#     	print fb.read(20)

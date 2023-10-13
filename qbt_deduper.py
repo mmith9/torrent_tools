@@ -256,7 +256,7 @@ def do_something_with_match(trr_file, local_file):
 
     if recheck:
         trr_file['full_path_client'] = local_file['full_path_client']
-        blocks_verified = recheck_file_full(trr_file)
+        blocks_verified = recheck_file_full(trr_file, client=args.qbt_client)
 
     unmark = False
     if not args.auto and not args.later:
