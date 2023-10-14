@@ -198,7 +198,8 @@ def verify_block(file, blocknum, block_data=None, data_source_file=None):
 
 def recheck_file(file, full_check=False):
     logger.debug('looking for>%s>%s', file['debug'], file['filename'])
-    logger.debug('offset %s blocksize %s', file['pieces_offset'], size_to_dib(file['piece_size']))
+    logger.debug('offset %s blocksize %s',
+                 file['pieces_offset'], size_to_dib(file['piece_size']))
 
     if not os.path.isfile(file['full_path_client']):
         logger.debug('file to recheck not found')
@@ -304,12 +305,16 @@ def copy_ranges_max(target, source, ranges):
                     src_file_pos += buffersize
 
 
-def recheck_file_full(file, client=False):
+def recheck_file_full(file, client=False, alt_file=False):
 
     if client:
         hashes = client.torrents_piece_hashes(torrent_hash=file['hash'])
     else:
         hashes = file['torrent'].piece_hashes
+
+    full_file_path = file['full_path_client']
+    if alt_file:
+        full_file_path = alt_file
 
     good_blocks = 0
     new_good_blocks = 0
@@ -318,21 +323,22 @@ def recheck_file_full(file, client=False):
     all_blocks = len(file['piece_states'])
 
     logger.debug('looking for>%s>%s', file['debug'], file['filename'])
-    logger.debug('offset %s blocksize %s blocks %s', file['pieces_offset'], size_to_dib(file['piece_size']), all_blocks)
+    logger.debug('offset %s blocksize %s blocks %s',
+                 file['pieces_offset'], size_to_dib(file['piece_size']), all_blocks)
+    logger.debug('using file: %s', full_file_path)
 
-    if not os.path.isfile(file['full_path_client']):
+    if not os.path.isfile(full_file_path):
         logger.debug('file to recheck not found')
         return False
 
-    file_path = file['full_path_client']
     piece_size = file['piece_size']
     offset = file['pieces_offset']
     file_size = file['size']
     piece_states = file['piece_states']
     blocknum = 0 if offset == 0 else 1
-    
+    new_piece_states = []
     try:
-        with io.open(file_path, 'rb' ) as fh:
+        with io.open(full_file_path, 'rb') as fh:
 
             fi = io.FileIO(fh.fileno())
             fb = io.BufferedReader(fi, buffer_size=file_size)
@@ -348,9 +354,10 @@ def recheck_file_full(file, client=False):
 
                 hash_computed = hashlib.sha1(block_data).hexdigest()
                 hash_read = hashes[blocknum + file['pieces_start']]
-                new_block_state = (hash_read.lower() == hash_computed.lower())                
+                new_block_state = (hash_read.lower() == hash_computed.lower())
 
                 if new_block_state:
+                    new_piece_states.append(2)
                     good_blocks += 1
                     if block_state == 0:
                         new_good_blocks += 1
@@ -358,14 +365,16 @@ def recheck_file_full(file, client=False):
                     else:
                         print('o', end='')
                 else:
+                    new_piece_states.append(0)
                     if block_state == 2:
                         new_bad_blocks += 1
                         print('!', end='')
                     else:
                         bad_blocks += 1
                         print('.', end='')
-                blocknum +=1
+                blocknum += 1
 
+            file['piece_states_recheck'] = new_piece_states
     except Exception as err:
         logger.error('error rechecking whole file %s', err)
         return False

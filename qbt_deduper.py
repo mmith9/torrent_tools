@@ -4,14 +4,16 @@ import logging
 import logging.config
 import os
 import re
+import shutil
 import time
 
 import numpy as np
 
-from autoram.files_on_disk import recheck_file, recheck_file_full
+from autoram.files_on_disk import recheck_file_full
 from autoram.qbt_api import connect_qbt
 from autoram.ranges import II
 from autoram.tr_payload import filter_no_meta, find_blocks_in_other_file
+from qbt_hammer import loop_rebuild_block, rebuild_block
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
@@ -148,6 +150,7 @@ def construct_file_dict_raw_part2(file_dict_raw):
                       'pieces_offset': pieces_offset,
                       'piece_states': piece_states,
                       'pieces_updated': [],
+                      'piece_states_recheck': [],
 
                       'ranges_complete': ranges_completed,
                       'ranges_updated': II.empty(),
@@ -236,6 +239,7 @@ def do_something_with_match(trr_file, local_file):
     print('possible match')
     print(f'torrent: {trr_file["filename"]}')
     print(f'local file: {local_file["filename"]}')
+    print(f'where: {local_file["full_path_client"]}')
 
     blocks_verified = False
     recheck = False
@@ -255,21 +259,23 @@ def do_something_with_match(trr_file, local_file):
         recheck = True
 
     if recheck:
-        trr_file['full_path_client'] = local_file['full_path_client']
-        blocks_verified = recheck_file_full(trr_file, client=args.qbt_client)
+        blocks_verified = recheck_file_full(
+            trr_file, client=args.qbt_client, alt_file=local_file['full_path_client'])
 
     unmark = False
     if not args.auto and not args.later:
         answer = ''
-        while answer not in ['n', 'a', 'u', 'l']:
+        while answer not in ['n', 'a', 'u', 'l', 's', 'r']:
             answer = input(
-                '(u)nmark download (n)ot (s)kip (l)ater (a)uto now ?>').lower()
+                '(u)nmark download (n)ot (s)kip (l)ater (a)uto now (r)epair download using this file ?>').lower()
         if answer == 'a':
             args.auto = True
         elif answer == 'u':
             unmark = True
         elif answer == 'l':
             args.later = True
+        elif answer == 'r':
+            repair_torrent_using_local_file(trr_file, local_file)
 
     if args.auto:
         unmark = True
@@ -287,6 +293,69 @@ def do_something_with_match(trr_file, local_file):
     }
 
     return pair_info
+
+
+def repair_torrent_using_local_file(trr_file, local_file):
+    if os.path.isfile(trr_file['full_path_client']) is False:
+        logger.info('Torrent file doesnt even exist, copying')
+        try:
+            path_to_make, _ = os.path.split(trr_file['full_path_client'])
+            os.makedirs(path_to_make, exist_ok=True)
+            shutil.copy(local_file['full_path_client'], trr_file['full_path_client'])
+        except Exception as err:
+            logger.error('error copying file')
+            logger.error(err)
+            return False
+
+        logger.info('Forcing recheck')
+        args.qbt_client.torrents_recheck(torrent_hashes=trr_file['hash'])
+        return True
+
+    if not trr_file['piece_states_recheck']:
+        if not recheck_file_full(trr_file, client=args.qbt_client, alt_file=local_file['full_path_client']):
+            return False
+
+    local_file['piece_states'] = trr_file['piece_states_recheck']
+    piece_size = trr_file['piece_size']
+    pieces_offset = trr_file['pieces_offset']
+    filesize = trr_file['size']
+
+    
+    ranges_completed = II.empty()
+    for blocknum, status in enumerate(local_file['piece_states']):
+        if status == 2:
+            lower_bound = max(0, blocknum*piece_size + pieces_offset)
+            upper_bound = min(filesize, (blocknum+1) *
+                              piece_size + pieces_offset)
+            ranges_completed = ranges_completed | II.closedopen(
+                lower_bound, upper_bound)
+
+    logger.debug(ranges_completed)
+    local_file['ranges_complete'] = ranges_completed
+    local_file['first_block_shared'] = trr_file['first_block_shared']
+    local_file['last_block_shared'] = trr_file['last_block_shared']
+    local_file['debug'] = ' LF'
+    # print(local_file)
+
+    num_blocks_fixed = 0
+    blocks_fixed = []
+    for blocknum, status in enumerate(trr_file['piece_states']):
+        if status != 2:
+            rebuilt = rebuild_block(trr_file, blocknum, [local_file])
+            if rebuilt:
+                blocks_fixed.append(blocknum)
+                num_blocks_fixed += 1
+                print('O', end='')
+            else:
+                print('.', end='')
+        else:
+            print('o', end='')
+    print('\n')
+    print('blocks fixed:', num_blocks_fixed)
+
+    if num_blocks_fixed > 0:
+        logger.info('Forcing recheck')
+        args.qbt_client.torrents_recheck(torrent_hashes=trr_file['hash'])
 
 
 def main():
@@ -338,10 +407,13 @@ def main():
 
             unmark = False
             answer = ''
-            while answer not in ['y', 'n', 'u']:
-                answer = input('(u)nmark download (n)ot ?>').lower()
+            while answer not in ['y', 'n', 'u', 's', 'r']:
+                answer = input(
+                    '(u)nmark download (s)kip, (r)epair download using this file ?>').lower()
             if answer in ['u', 'y']:
                 unmark = True
+            elif answer == 'r':
+                repair_torrent_using_local_file(trr_file, local_file)
 
             if unmark:
                 args.qbt_client.torrents_file_priority(
@@ -356,8 +428,8 @@ if __name__ == "__main__":
     parser = ArgumentParser(
         description='Look for torrent files in local files')
 
-    parser.add_argument('dirs', type=str, nargs='+', help='Directories to scan')
-
+    parser.add_argument('dirs', type=str, nargs='+',
+                        help='Directories to scan')
 
     parser.add_argument('-all', dest='process_all', default=False, action='store_true',
                         help='Inject into paused files too, default false')

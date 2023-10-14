@@ -182,7 +182,7 @@ def find_files_to_merge(file_dict):
         for file in group:
             if is_file_unique_to_group(file, new_group):
                 new_group.append(file)
-        if len(new_group) >1:
+        if len(new_group) > 1:
             filtered_merge_list.append(new_group)
     print()
     logger.info('Got %s groups to work with', len(filtered_merge_list))
