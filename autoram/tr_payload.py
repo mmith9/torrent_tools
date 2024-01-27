@@ -8,7 +8,7 @@ import time
 
 import numpy as np
 
-from autoram.files_on_disk import is_physical_file_unique
+from autoram.files_on_disk import get_full_client_path_for_torrent_file, is_physical_file_unique
 from autoram.ranges import II
 
 logging.config.fileConfig('logging.conf')
@@ -38,6 +38,15 @@ def filter_no_pieces(torrents):
     return gots_pieces
 
 
+# def get_full_dict(short_dict: dict) -> dict:
+
+#     for size, files in short_dict.items():
+
+#         for file in files:
+
+#             if file.parent_hash == 'file':
+
+
 def construct_file_dict(torrents, dict_params):
     reg_exclude = config.get('behaviour', 'nono_regex')
     reg_targets = dict_params['tg_regex']
@@ -51,8 +60,11 @@ def construct_file_dict(torrents, dict_params):
     count_files = 0
     min_file_size = config.getint('behaviour', 'min_file_size') * 1024*1024
 
+    count_total = len(torrents)
+    count=0
+
     for trr in torrents:
-        print('_', end='')
+        count+=1
         file_offset = 0
 
         if filemax and count_files >= filemax:
@@ -61,8 +73,8 @@ def construct_file_dict(torrents, dict_params):
 
         for file in trr.files:
             count_files += 1
+            print(f'\r{count} of {count_total} trrs {count_files} files', end='')
             size = file.size
-            print('.', end='')
 
             skip = False
             #skip = skip or file.priority == 0
@@ -95,8 +107,12 @@ def construct_file_dict_raw_part2(file_dict_raw, targets):
         target_sizes.add(file.size)
 
     logger.debug('Extracting full info about groups of 2 and more')
+    count_total = len(file_dict_raw.items())
+    count=0
     for size, group in file_dict_raw.items():
-        print('.', end='')
+        count+=1
+        print('\r                                                                     ', end='')
+        print(f'\r{count} of {count_total}', end='')
         if target_sizes and size not in target_sizes:
             continue
         if len(group) < 2:
@@ -106,33 +122,34 @@ def construct_file_dict_raw_part2(file_dict_raw, targets):
         file_dict[size] = []
         for trr, file, file_offset in group:
             print('.', end='')
-            full_path_client = config['client']['qbt_tempdir'] + file['name']
-            try:
-                file_is_complete = file.progress == 1
-                complete_file_exists = os.path.isfile(full_path_client)
-                incomplete_file_exists = os.path.isfile(
-                    full_path_client + '.!qB')
+            full_path_client = get_full_client_path_for_torrent_file(trr, file)
+            file_is_complete = file.progress == 1
+            file_exists = os.path.isfile(full_path_client)
 
-                # print(f't{trr.hash[:4]}f{file["id"]}')
-                if not file_is_complete and complete_file_exists:
-                    logger.warning(
-                        'incomplete but some other file exists and appears full %s', file.name)
-                if file_is_complete and incomplete_file_exists:
-                    logger.warning(
-                        'complete file but some incomplete file exists too %s', file.name)
-                if file_is_complete and not complete_file_exists:
-                    logger.warning(
-                        'file complete but does not exist %s', file.name)
+            # try:
+            #     complete_file_exists = os.path.isfile(full_path_client)
+            #     incomplete_file_exists = os.path.isfile(full_path_client)
 
-                if not file_is_complete:
-                    full_path_client += '.!qB'
-                    file_exists = incomplete_file_exists
-                else:
-                    file_exists = complete_file_exists
+            #     # print(f't{trr.hash[:4]}f{file["id"]}')
+            #     if not file_is_complete and complete_file_exists:
+            #         logger.warning(
+            #             'incomplete but some other file exists and appears full %s', file.name)
+            #     if file_is_complete and incomplete_file_exists:
+            #         logger.warning(
+            #             'complete file but some incomplete file exists too %s', file.name)
+            #     if file_is_complete and not complete_file_exists:
+            #         logger.warning(
+            #             'file complete but does not exist %s', file.name)
 
-            except Exception as err:
-                logger.error('Cant find file because of %s', err)
-                continue
+            #     if not file_is_complete:
+            #         full_path_client += '.!qB'
+            #         file_exists = incomplete_file_exists
+            #     else:
+            #         file_exists = complete_file_exists
+
+            # except Exception as err:
+            #     logger.error('Cant find file because of %s', err)
+            #     continue
             # print('\n--')
             # logger.info(full_path_client)
             # logger.info('isc %s cfe %s ife %s', file_is_complete, \
@@ -181,6 +198,7 @@ def construct_file_dict_raw_part2(file_dict_raw, targets):
                       'pieces_offset': pieces_offset,
                       'piece_states': piece_states,
                       'pieces_updated': [],
+                      'category': trr.category,
 
                       'ranges_complete': ranges_completed,
                       'ranges_updated': II.empty(),

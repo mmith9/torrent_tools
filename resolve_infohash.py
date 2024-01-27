@@ -14,7 +14,6 @@ import mysql.connector
 import libtorrent
 import my_torrent_stuff
 
-
 VERSION = "0.0.1"
 
 

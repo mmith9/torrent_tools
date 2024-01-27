@@ -386,9 +386,85 @@ def recheck_file_full(file, client=False, alt_file=False):
     return (good_blocks, new_good_blocks, bad_blocks, new_bad_blocks)
 
 
-# #file descriptor is obtained by making using of FileIO which is used to identify the file that is opened
-#     	fi  = io.FileIO(file.fileno())
-#     	#Buffered reader is then used to read the contents of the file
-#     	fb = io.BufferedReader(fi)
-#     	#the contents of the file is printed
-#     	print fb.read(20)
+def get_full_client_path_for_torrent_file(torrent, file):
+    server_qbt_tempdir = config.get('server', 'qbt_tempdir')
+    client_qbt_tempdir = config.get('client', 'qbt_tempdir')
+    server_qbt_savedir = config.get('server', 'qbt_savedir')
+    client_qbt_savedir = config.get('client', 'qbt_savedir')
+
+    if os.name == 'nt':
+        is_win = True
+    elif os.name == 'posix':
+        is_win = False
+    elif '\\' in client_qbt_savedir+client_qbt_tempdir:
+        is_win = True
+    elif '/' in client_qbt_savedir+client_qbt_tempdir:
+        is_win = False
+    else:
+        logger.error('unknown system directory separator (/ or \\')
+        is_win = False
+
+    #alt
+    #torrents_info.data[0]['content_path']
+    #'<mount_point>/<qbittorrent_tempdir>/<category_subdir>/<torrent_subdir>'
+
+    #torrents_info.data[0]['download_path']
+    #'<mount_point>/<qbittorrent_tempdir>/<category_subdir>'
+
+    #torrents_info.data[0]['save_path']
+    #'<mount_point>/<qbittorrent_savedir>/<category_subdir>'
+
+    #torrents_info.data[0].files.data[0]
+    #torrents_info.data[0].files.data[0]['name']
+    #'<torrent_subdir>/<file_name_without .!qB extension>'
+
+    temp_path = torrent['download_path']
+    save_path = torrent['save_path']
+
+    if temp_path.startswith(server_qbt_tempdir):
+        temp_path=temp_path.replace(server_qbt_tempdir, client_qbt_tempdir)
+    else:
+        logger.warning('bad temp path %s', temp_path)
+        temp_path = client_qbt_tempdir
+
+    if save_path.startswith(server_qbt_savedir):
+        save_path=save_path.replace(server_qbt_savedir, client_qbt_savedir)
+    else:
+        logger.warning('bad save path %s', save_path)
+        save_path = client_qbt_savedir
+
+    temp_path = os.path.join(temp_path, file.name)
+    save_path = os.path.join(save_path, file.name)
+
+    if is_win:
+        temp_path = temp_path.replace('/', '\\')    
+        save_path = save_path.replace('/', '\\')    
+    else:
+        temp_path = temp_path.replace('\\', '/')    
+        save_path = save_path.replace('\\', '/')    
+
+    paths = [
+        temp_path,
+        temp_path + '.!qB',
+        save_path,
+        save_path + '.!qB'
+    ]
+
+    for a_path in paths:
+        if os.path.isfile(a_path):
+            logger.debug('exists: %s', a_path)
+            return a_path
+
+    logger.debug('file does not exist, returning default')
+    temp_path+= '.!qB'
+    logger.debug(temp_path)
+    return temp_path
+
+def scan_tree(path):
+    """Recursively yield DirEntry objects for given directory."""
+    for entry in os.scandir(path):
+        if entry.is_dir(follow_symlinks=False):
+            yield from scan_tree(entry.path)
+        else:
+            yield entry
+

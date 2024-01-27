@@ -6,11 +6,13 @@ import logging.config
 import os
 import shutil
 import time
+from typing import List, Tuple
 
 import numpy as np
 
-from autoram.files_on_disk import (read_ranges, verify_and_fix_physical_file,
-                                   verify_block, write_block)
+from autoram.files_on_disk import (get_full_client_path_for_torrent_file, read_ranges, scan_tree,
+                                   verify_and_fix_physical_file, verify_block, write_block)
+from autoram.klasses import FileOfSize
 from autoram.qbt_api import connect_qbt
 from autoram.ranges import (II, estimate_gain_from_repair, get_block_ranges,
                             shift_ranges, size_to_dib, sum_ranges)
@@ -80,6 +82,8 @@ def merge_multi_ready(files):
     existing_files = []
     empty_files = []
     unique_files = []
+    hashes_to_recheck = set()
+
     for file in files:
         if file['progress'] == 1:
             logger.info(
@@ -93,66 +97,71 @@ def merge_multi_ready(files):
         else:
             empty_files.append(file)
 
+    if len(existing_files) <1:
+        print('Not enough existing files to do anything')
+        return False
+
     existing_files.sort(key=lambda x: x['progress'], reverse=True)
-    file0 = existing_files[0]
 
-    infohash = file0['hash']
-    print(f"Parent {size_to_dib(file0['size'])} \n{file0['filename']}")
-    print('copies :')
-    for file in unique_files:
-        if file == file0:
+    if args.crossmerge:
+        files0 = existing_files.copy()
+    else:
+        files0 = existing_files[:1]
+
+    for file0 in files0:
+        other_files = existing_files.copy()
+        other_files.remove(file0)
+
+        print(f"Parent {size_to_dib(file0['size'])} \n{file0['filename']}")
+        print('copies :')
+
+        for file in unique_files:
+            if file == file0:
+                continue
+            if file in existing_files:
+                print('(EXISTS)', file['filename'])
+            else:
+                print('(NOFILE)', file['filename'])
+
+        if len(other_files) == 0:
             continue
-        if file in existing_files:
-            print(file['filename'])
-        else:
-            print('(nofile)', file['filename'])
 
-    blocks_fixed = []
-    if len(existing_files) > 1:
-        blocks_fixed = loop_rebuild_block(file0, existing_files[1:])
+        blocks_fixed = loop_rebuild_block(file0, other_files)
+        if len(blocks_fixed) > 0 :
+            hashes_to_recheck.add(file0['hash'])
 
-    end_now = False
-    if len(existing_files) > 1:
+        end_now = False
         if args.auto:
             if not args.hammer and not args.hardmerge:
                 end_now = True
         elif not args.auto and ask_user('hammer file?', ['y', 'n']) == 'n':
             end_now = True
-    else:
-        if not args.hardmerge:
-            end_now = True
-    if end_now:
-        if len(blocks_fixed) > 0:
-            return [infohash]
-        else:
-            return False
 
-    blocks_hammered = []
-    if len(existing_files) > 1:
+        if end_now:
+            continue
+
         blocks_hammered = loop_hammer_block(
-            file0, existing_files[1:], blocks_fixed)
+            file0, other_files, blocks_fixed)
+        if len(blocks_hammered) > 0:
+            hashes_to_recheck.add(file0['hash'])
 
-    end_now = False
-    if args.auto:
-        if not args.hardmerge:
+    # exclusive with cross merge
+    if not args.crossmerge:
+        end_now = False
+        if args.auto:
+            if not args.hardmerge:
+                end_now = True
+        elif not args.auto and ask_user('hardmerge file?', ['y', 'n']) == 'n':
             end_now = True
-    elif not args.auto and ask_user('hardmerge file?', ['y', 'n']) == 'n':
-        end_now = True
-    if end_now:
-        if len(blocks_fixed) + len(blocks_hammered) > 0:
-            return [infohash]
-        else:
-            return False
+        if end_now:
+            return list(hashes_to_recheck)
 
-    result = hard_merge(file0, unique_files)
-    if result or len(blocks_fixed) + len(blocks_hammered) > 0:
+        result = hard_merge(file0, unique_files)
         if result:
-            result.append(infohash)
-            return result
-        else:
-            return [infohash]
-    else:
-        return False
+            result.append(file0['hash'])
+            return result        
+
+    return list(hashes_to_recheck)
 
 
 def find_files_to_merge(file_dict):
@@ -455,7 +464,8 @@ def hammer_block(source_file, blocknum, source_files):
         # print('`', end='')
         if is_shared_block:
             block_fixed = verify_block_shared(
-                source_file, blocknum=blocknum, block_data=hammered_block, source_files=source_files)
+                source_file, blocknum=blocknum, 
+                block_data=hammered_block, source_files=source_files)
             logger.debug(
                 'Tried to verify SHARED block, result %s', block_fixed)
         else:
@@ -591,6 +601,8 @@ dest: {file0['filename']}
             new_path=file0['path_server']
         )
 
+        args.qbt_client.torrents_set_category(category=file0['category'], torrent_hashes=file['hash']) 
+
         args.qbt_client.torrents_add_tags(
             torrent_hashes=file['hash'], tags='_ram_clone')
         hashes_to_recheck.append(file['hash'])
@@ -602,6 +614,97 @@ dest: {file0['filename']}
     return hashes_to_recheck
 
 
+def add_sizes_dict_qbt(sizes: dict, torrents: list) -> None:
+    min_file_size = config.getint('behaviour', 'min_file_size') * 1024**2
+    total = len(torrents)
+    count = 0
+
+    for trr in torrents:
+        count += 1
+        if trr.size <= 0:
+            continue
+
+        print(f'{count} of {total} torrents ', end='\r')
+        for file in trr.files:
+            if file.size < min_file_size:
+                continue
+
+            if file.size not in sizes:
+                sizes[file.size] = []
+            file_path = get_full_client_path_for_torrent_file(trr, file)
+            sizes[file.size].append(FileOfSize(
+                size=file.size, path=file_path, parent_hash=trr.hash))
+    print()
+
+
+def add_sizes_dict_dirs(sizes: dict, dirs: list) -> None:
+    min_file_size = config.getint('behaviour', 'min_file_size') * 1024**2
+
+    if len(dirs) == 1 and dirs[0] == 'all':
+        dirs = config.get('client', 'all_local_dirs').split(' ')
+
+    for dir_ in dirs:
+        print(f'scanning {dir_}')
+        count = 0
+        for entry in scan_tree(dir_):
+            count += 1
+            print(f'{count} files ', end='\r')
+            if not entry.is_file:
+                continue
+
+            file_size = entry.stat(follow_symlinks=False).st_size
+            if file_size < min_file_size:
+                continue
+
+            if file_size not in sizes:
+                sizes[file_size] = []
+
+            sizes[file_size].append(FileOfSize(
+                size=file_size, path=entry.path, parent_hash='file'))
+        print()
+
+
+def count_existing_files(files: List[FileOfSize]) -> int:
+    qbt_tempdir = config.get('client', 'qbt_tempdir')
+    count = 0
+    for file in files:
+        if file.parent_hash == 'file':
+            count += 1
+            continue
+
+        full_path = (os.path.join(qbt_tempdir, file.path + '.!qB'))
+        if os.path.isfile(full_path):
+            count += 1
+        # print(count, end=' ')
+    return count
+
+
+def get_sizes_dict(torrents: list, dirs: str) -> Tuple[dict, list]:
+    sizes = {}
+    logger.info('scanning dirs')
+    add_sizes_dict_dirs(sizes, dirs)
+    logger.info('scanning torrents')
+    add_sizes_dict_qbt(sizes, torrents)
+
+
+    logger.info('filtering usable sizes from %s sizes', len(sizes))
+    hashes = set()
+    usable_sizes = {}
+    for size, files in sizes.items():
+        if len(files) <= 1:
+            continue
+
+        if count_existing_files(files) == 0:
+            continue
+
+        usable_sizes[size] = files
+        for file in files:
+            hashes.add(file.parent_hash)
+    logger.info('Usable sizes found %s from %s torrents',
+                len(usable_sizes), len(hashes))
+    return (usable_sizes, hashes)
+
+
 def main():
     logger.info('Connecting to server')
     qbt_client = connect_qbt()
@@ -611,7 +714,10 @@ def main():
         torrents = qbt_client.torrents_info()
     else:
         torrents = qbt_client.torrents_info(filter='resumed')
-    # torrents = qbt_client.torrents_info(torrent_hashes=test_hashes)
+
+    dict_of_sizes, filtered_hashes = get_sizes_dict(torrents, args.dirs)
+    del torrents
+    torrents = qbt_client.torrents_info(torrent_hashes=filtered_hashes)
 
     logger.info('Got torrents')
 
@@ -644,12 +750,22 @@ def main():
         if result:
             hashes_to_recheck.extend(result)
 
-    print('resuming torrents')
-    qbt_client.torrents_resume(torrent_hashes=hashes_to_recheck)
-    print('forcing rechecks')
-    for infohash in hashes_to_recheck:
+    answer =''
+    while answer not in ['y', 'n']:
+        answer = input('resume torrents? <y/n>').lower()
+    if answer == 'y':
+        qbt_client.torrents_resume(torrent_hashes=hashes_to_recheck)
+
+    answer =''
+    while answer not in ['y', 'n']:
+        answer = input('force rechecks? <y/n>').lower()
+    if answer == 'y':
+        qbt_client.torrents_recheck(torrent_hashes=hashes_to_recheck)
+
+    print('Altered torrents')
+    for infohash in set(hashes_to_recheck):
         print(infohash)
-    qbt_client.torrents_recheck(torrent_hashes=hashes_to_recheck)
+    
 
 
 if __name__ == "__main__":
@@ -657,16 +773,22 @@ if __name__ == "__main__":
     parser = ArgumentParser(
         description='hammer till they finish')
 
+    parser.add_argument('dirs', type=str, nargs='*',
+                        help='directories to scan, if "all", read them from config')
+
     parser.add_argument('-all', dest='process_all', default=False, action='store_true',
                         help='Inject into paused files too, default false')
 
-    parser.add_argument('-hammer', default=False, action='store_true',
+    parser.add_argument('-x', '--crossmerge', dest='crossmerge', default=False, action='store_true',
+        help='Repair each file in each group instad of just one, exclusive with hardmerge')
+
+    parser.add_argument('-hm','--hammer', dest='hammer', default=False, action='store_true',
                         help='Try hard to rebuild')
 
-    parser.add_argument('-hardmerge', default=False, action='store_true',
+    parser.add_argument('-hr', '--hardmerge', dest='hardmerge', default=False, action='store_true',
                         help='Point both torrents to 3rd (possible merged) file')
 
-    parser.add_argument('-verify', default=False, action='store_true',
+    parser.add_argument('-v','--verify', default=False, action='store_true',
                         help='Check if any new blocks appeared')
 
     parser.add_argument('-debug', dest='debug', action='store_true')
@@ -680,8 +802,11 @@ if __name__ == "__main__":
     if args.debug:
         logger.setLevel(logging.DEBUG)
 
-    time_start = time.time()
-    main()
-    time_end = time.time()
-    total_time = time_end - time_start
-    print("\nExecution time: " + str(total_time))
+    if args.hardmerge and args.crossmerge:
+        print('hardmerge and crossmerge are mutually exclusive')
+    else:
+        time_start = time.time()
+        main()
+        time_end = time.time()
+        total_time = time_end - time_start
+        print("\nExecution time: " + str(total_time))

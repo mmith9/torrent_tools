@@ -9,11 +9,11 @@ import time
 
 import numpy as np
 
-from autoram.files_on_disk import recheck_file_full
+from autoram.files_on_disk import get_full_client_path_for_torrent_file, recheck_file_full
 from autoram.qbt_api import connect_qbt
 from autoram.ranges import II
 from autoram.tr_payload import filter_no_meta, find_blocks_in_other_file
-from qbt_hammer import loop_rebuild_block, rebuild_block
+from qbt_hammer import get_sizes_dict, rebuild_block
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
@@ -30,7 +30,10 @@ def construct_file_dict(torrents, dict_params):
     logger.info('Processing %s torrents', len(torrents))
     logger.info('Building sizes dictionary')
     count_files = 0
-    min_file_size = config.getint('behaviour', 'min_file_size') * 1024*1024
+    if args.min_size:
+        min_file_size = args.min_size * 1024*1024
+    else:
+        min_file_size = config.getint('behaviour', 'min_file_size') * 1024*1024
 
     for trr in torrents:
         print('_', end='')
@@ -75,7 +78,7 @@ def construct_file_dict_raw_part2(file_dict_raw):
         file_dict[size] = []
         for trr, file, file_offset in group:
             print('.', end='')
-            full_path_client = config['client']['qbt_tempdir'] + file['name']
+            full_path_client = get_full_client_path_for_torrent_file(trr, file)
             try:
                 file_is_complete = file.progress == 1
                 complete_file_exists = os.path.isfile(full_path_client)
@@ -94,7 +97,8 @@ def construct_file_dict_raw_part2(file_dict_raw):
                         'file complete but does not exist %s', file.name)
 
                 if not file_is_complete:
-                    full_path_client += '.!qB'
+                    if not full_path_client.lower().endswith('.!qb'):
+                        full_path_client += '.!qB'
                     file_exists = incomplete_file_exists
                 else:
                     file_exists = complete_file_exists
@@ -165,12 +169,34 @@ def construct_file_dict_raw_part2(file_dict_raw):
     print()
     return file_dict
 
+def construct_file_dict_from_size_dict(sizes_dict):
+
+    filedict = {}
+    for size, files in sizes_dict.items():
+        for file in files:
+            if file.parent_hash != 'file':
+                continue
+
+            if size not in filedict:
+                filedict[size] = []
+
+            fileinfo = {
+                'size': size,
+                'filename': file.path,
+                'full_path_client': file.path,
+                'ranges_complete': II.closedopen(0, size),
+            }
+            filedict[size].append(fileinfo)
+    return filedict
 
 def scan_local_discs(dirs):
     logger.info('scanning dirs and building sizes dict')
     filedict = {}
     extensions = ['.mkv', '.mp4', '.m4v', '.wmv', '.avi', '.mpg']
-    min_file_size = config.getint('behaviour', 'min_file_size') * 1024*1024
+    if args.min_size:
+        min_file_size = args.min_size * 1024*1024
+    else:
+        min_file_size = config.getint('behaviour', 'min_file_size') * 1024*1024
 
     for dir in dirs:
         for path, _, files in os.walk(dir):
@@ -296,6 +322,7 @@ def do_something_with_match(trr_file, local_file):
 
 
 def repair_torrent_using_local_file(trr_file, local_file):
+    logger.debug('looking for file %s',trr_file['full_path_client'])
     if os.path.isfile(trr_file['full_path_client']) is False:
         logger.info('Torrent file doesnt even exist, copying')
         try:
@@ -359,6 +386,7 @@ def repair_torrent_using_local_file(trr_file, local_file):
 
 
 def main():
+    print(args.dirs)
     logger.info('Connecting to server')
     qbt_client = connect_qbt()
     args.qbt_client = qbt_client
@@ -369,6 +397,10 @@ def main():
         torrents = qbt_client.torrents_info(filter='resumed')
     # torrents = qbt_client.torrents_info(torrent_hashes=test_hashes)
 
+    dict_of_sizes, filtered_hashes = get_sizes_dict(torrents, args.dirs)
+    del torrents
+    torrents = qbt_client.torrents_info(torrent_hashes=filtered_hashes)
+
     logger.info('Got torrents')
 
     dict_params = {
@@ -378,7 +410,8 @@ def main():
 
     logger.info('scanning directories')
 
-    local_files = scan_local_discs(args.dirs)
+    local_files = construct_file_dict_from_size_dict(dict_of_sizes)
+    # local_files = scan_local_discs(args.dirs)
     logger.info('construct file dict')
     torrent_files = construct_file_dict(torrents, dict_params)
 
@@ -441,14 +474,14 @@ if __name__ == "__main__":
     parser.add_argument('-auto', action='store_true',
                         help='autoresolve (un-download)')
 
-    parser.add_argument('-later', action='store_true',
+    parser.add_argument('-l', '--later', dest ='later', action='store_true',
                         help='scan first, ask later')
 
-    parser.add_argument('-stop', action='store_true', default=False,
-                        help='Auto stop downloads when file found')
-
-    parser.add_argument('-verify', default=False, action='store_true',
+    parser.add_argument('-v', '--verify', dest='verify', default=False, action='store_true',
                         help='Full verify found suspects')
+
+    parser.add_argument('-s', '--min_size', dest='min_size', default=False, type =int,
+                        help='min size in MiB to bother (override config)')
 
     args = parser.parse_args()
 

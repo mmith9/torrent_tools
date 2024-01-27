@@ -7,7 +7,6 @@ import qbittorrentapi
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
 config = configparser.ConfigParser()
-config = configparser.ConfigParser()
 config.read('autoram.ini')
 
 def connect_qbt():
@@ -15,7 +14,11 @@ def connect_qbt():
         host=config['server']['host'],
         port=config['server']['port'],
         username=config['server']['username'],
-        password=config['server']['password']
+        password=config['server']['password'],
+        REQUESTS_ARGS={'timeout': (
+            float(config['server']['connect_timeout']),
+            float(config['server']['read_timeout'])
+            )}
     )
 
     try:
