@@ -487,13 +487,13 @@ def main():
 if __name__ == "__main__":
     from argparse import ArgumentParser
     parser = ArgumentParser(
-        description='Look for torrent files in local files')
+        description='Look for torrent data locally')
 
     parser.add_argument('dirs', type=str, nargs='+',
                         help='Directories to scan')
 
     parser.add_argument('-all', dest='process_all', default=False, action='store_true',
-                        help='Inject into paused files too, default false')
+                        help='Inject into all, default - only resumed')
 
     parser.add_argument('-debug', dest='debug', action='store_true')
 

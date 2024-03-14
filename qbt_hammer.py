@@ -704,16 +704,16 @@ if __name__ == "__main__":
                         help='directories to scan, if "all", read them from config')
 
     parser.add_argument('-all', dest='process_all', default=False, action='store_true',
-                        help='Inject into paused files too, default false')
+                        help='Process all torrent, default - only resumed')
 
     parser.add_argument('-x', '--crossmerge', dest='crossmerge', default=False, action='store_true',
         help='Repair each file in each group instad of just one, exclusive with hardmerge')
 
     parser.add_argument('-hm','--hammer', dest='hammer', default=False, action='store_true',
-                        help='Try hard to rebuild')
+                        help='Try harder to rebuild')
 
     parser.add_argument('-hr', '--hardmerge', dest='hardmerge', default=False, action='store_true',
-                        help='Point both torrents to 3rd (possible merged) file')
+                        help='Repair the most complete file and point other torrents to that file')
 
     parser.add_argument('-v','--verify', default=False, action='store_true',
                         help='Check if any new blocks appeared')
