@@ -5,25 +5,26 @@ import logging
 import logging.config
 import os
 import shutil
+import sys
 import time
 from typing import List, Tuple
 
 import numpy as np
 
-from autoram.files_on_disk import (get_full_client_path_for_torrent_file, read_ranges, scan_tree,
+from autoram.files_on_disk import (get_client_path_to_backup_dir, get_full_client_path_for_torrent_file, read_ranges, scan_tree,
                                    verify_and_fix_physical_file, verify_block, write_block)
 from autoram.klasses import FileOfSize
 from autoram.qbt_api import connect_qbt
 from autoram.ranges import (II, estimate_gain_from_repair, get_block_ranges,
                             shift_ranges, size_to_dib, sum_ranges)
 from autoram.test_hashes import test_hashes
-from autoram.tr_payload import (construct_file_dict, is_file_unique_to_group,
+from autoram.tr_payload import (construct_file_dict, filterout_nometa_and_completeds, get_sizes_dict, is_file_unique_to_group,
                                 match_same_size_files_multi)
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
 
-config = configparser.ConfigParser()
+config = configparser.ConfigParser(allow_no_value=True, delimiters='=')
 config.read('autoram.ini')
 
 
@@ -112,14 +113,14 @@ def merge_multi_ready(files):
         other_files = existing_files.copy()
         other_files.remove(file0)
 
-        print(f"Parent {size_to_dib(file0['size'])} \n{file0['filename']}")
+        print(f"Parent {size_to_dib(file0['size'])} \n{file0['full_path_client']}")
         print('copies :')
 
         for file in unique_files:
             if file == file0:
                 continue
             if file in existing_files:
-                print('(EXISTS)', file['filename'])
+                print('(EXISTS)', file['full_path_client'])
             else:
                 print('(NOFILE)', file['filename'])
 
@@ -269,7 +270,13 @@ def rebuild_block(source_file, blocknum, source_files):
     block_data = np.zeros(block_size, dtype=np.ubyte)
     for file in all_files:
         usable_ranges = need_ranges & file['ranges_complete']
-        assert len(usable_ranges) <= 1
+        if len(usable_ranges) > 1:
+            logger.error('assertion error for usable ranges, should be monoblock')
+            logger.error('file %s', file['full_path_client'])
+            logger.error('need ranges %s', need_ranges)
+            logger.error('usable ranges %s', usable_ranges)
+            input('Enter to proceed...')
+            continue
         if usable_ranges != II.empty():
             data_lower = usable_ranges.lower - need_ranges.lower
             data_upper = usable_ranges.upper - need_ranges.lower + 1
@@ -484,7 +491,7 @@ def hammer_block(source_file, blocknum, source_files):
         # print('`', end='')
         all_zeroed = True
         for x in hammer_ranges:
-            print('.', end='')
+            #print('.', end='')
             counters[x] += 1
             if counters[x] >= len(block_matrix[x]):
                 counters[x] = 0
@@ -567,20 +574,19 @@ def hard_merge(file0, all_files):
             continue
 
         if file['file_exists']:
+            backup_dir = get_client_path_to_backup_dir(file)
             logger.debug('moving %s to', file['filename'])
-            new_path_client = os.path.join(
-                config['client']['backup_dir'], file['hash'])
-            new_path_client = os.path.join(new_path_client, file['filename'])
-            logger.debug(new_path_client)
+           
+            new_path_client = os.path.join(backup_dir, file['hash'])
+            # new_path_client = os.path.join(new_path_client, file['filename'])
 
-            dir_to_make, _ = os.path.split(new_path_client)
-            os.makedirs(dir_to_make, exist_ok=True)
+            #dir_to_make, _ = os.path.split(new_path_client)
+            os.makedirs(new_path_client, exist_ok=True)
             shutil.move(file['full_path_client'], new_path_client)
             logger.debug('file moved')
 
             with open(
-                os.path.join(config['client']['backup_dir'],
-                             f'log_{time_now}.txt'), 'a', encoding='utf-8') as fh:
+                os.path.join(backup_dir,f'log_{time_now}.txt'), 'a', encoding='utf-8') as fh:
 
                 fh.writelines(f'''
 ---------
@@ -614,96 +620,6 @@ dest: {file0['filename']}
     return hashes_to_recheck
 
 
-def add_sizes_dict_qbt(sizes: dict, torrents: list) -> None:
-    min_file_size = config.getint('behaviour', 'min_file_size') * 1024**2
-    total = len(torrents)
-    count = 0
-
-    for trr in torrents:
-        count += 1
-        if trr.size <= 0:
-            continue
-
-        print(f'{count} of {total} torrents ', end='\r')
-        for file in trr.files:
-            if file.size < min_file_size:
-                continue
-
-            if file.size not in sizes:
-                sizes[file.size] = []
-            file_path = get_full_client_path_for_torrent_file(trr, file)
-            sizes[file.size].append(FileOfSize(
-                size=file.size, path=file_path, parent_hash=trr.hash))
-    print()
-
-
-def add_sizes_dict_dirs(sizes: dict, dirs: list) -> None:
-    min_file_size = config.getint('behaviour', 'min_file_size') * 1024**2
-
-    if len(dirs) == 1 and dirs[0] == 'all':
-        dirs = config.get('client', 'all_local_dirs').split(' ')
-
-    for dir_ in dirs:
-        print(f'scanning {dir_}')
-        count = 0
-        for entry in scan_tree(dir_):
-            count += 1
-            print(f'{count} files ', end='\r')
-            if not entry.is_file:
-                continue
-
-            file_size = entry.stat(follow_symlinks=False).st_size
-            if file_size < min_file_size:
-                continue
-
-            if file_size not in sizes:
-                sizes[file_size] = []
-
-            sizes[file_size].append(FileOfSize(
-                size=file_size, path=entry.path, parent_hash='file'))
-        print()
-
-
-def count_existing_files(files: List[FileOfSize]) -> int:
-    qbt_tempdir = config.get('client', 'qbt_tempdir')
-    count = 0
-    for file in files:
-        if file.parent_hash == 'file':
-            count += 1
-            continue
-
-        full_path = (os.path.join(qbt_tempdir, file.path + '.!qB'))
-        if os.path.isfile(full_path):
-            count += 1
-        # print(count, end=' ')
-    return count
-
-
-def get_sizes_dict(torrents: list, dirs: str) -> Tuple[dict, list]:
-    sizes = {}
-    logger.info('scanning dirs')
-    add_sizes_dict_dirs(sizes, dirs)
-    logger.info('scanning torrents')
-    add_sizes_dict_qbt(sizes, torrents)
-
-
-    logger.info('filtering usable sizes from %s sizes', len(sizes))
-    hashes = set()
-    usable_sizes = {}
-    for size, files in sizes.items():
-        if len(files) <= 1:
-            continue
-
-        if count_existing_files(files) == 0:
-            continue
-
-        usable_sizes[size] = files
-        for file in files:
-            hashes.add(file.parent_hash)
-    logger.info('Usable sizes found %s from %s torrents',
-                len(usable_sizes), len(hashes))
-    return (usable_sizes, hashes)
-
 
 def main():
     logger.info('Connecting to server')
@@ -715,10 +631,16 @@ def main():
     else:
         torrents = qbt_client.torrents_info(filter='resumed')
 
+    torrents = filterout_nometa_and_completeds(torrents)
+
     dict_of_sizes, filtered_hashes = get_sizes_dict(torrents, args.dirs)
+    print(f'torrents {len(torrents)} filtered {len(filtered_hashes)}')
+    if len(filtered_hashes) == 0:
+        print('quitting')
+        sys.exit(0)
     del torrents
     torrents = qbt_client.torrents_info(torrent_hashes=filtered_hashes)
-
+    print(f'again torrents {len(torrents)}')
     logger.info('Got torrents')
 
     dict_params = {
@@ -741,22 +663,27 @@ def main():
     print('Merge start')
 
     hashes_to_recheck = []
+    count  = 0
+    count_total = len(merge_list)
     for group in merge_list:
+        count+=1
         if len(group) <= 1:
             continue
+
+        print(f'\nGroup {count} of {count_total} ')
 
         logger.debug('merging group of %s', len(group))
         result = merge_multi(group)
         if result:
             hashes_to_recheck.extend(result)
 
-    answer =''
+    answer = 'y' if args.auto else ''
     while answer not in ['y', 'n']:
         answer = input('resume torrents? <y/n>').lower()
     if answer == 'y':
         qbt_client.torrents_resume(torrent_hashes=hashes_to_recheck)
 
-    answer =''
+    answer = 'y' if args.auto else ''
     while answer not in ['y', 'n']:
         answer = input('force rechecks? <y/n>').lower()
     if answer == 'y':

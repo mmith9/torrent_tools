@@ -6,7 +6,7 @@ import numpy as np
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
-config = configparser.ConfigParser()
+config = configparser.ConfigParser(allow_no_value=True, delimiters='=')
 config.read('autoram.ini')
 
 

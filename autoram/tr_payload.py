@@ -5,16 +5,18 @@ import logging.config
 import os
 import re
 import time
+from typing import List, Tuple
+from autoram.klasses import FileOfSize
 
 import numpy as np
 
-from autoram.files_on_disk import get_full_client_path_for_torrent_file, is_physical_file_unique
+from autoram.files_on_disk import get_full_client_path_for_torrent_file, is_physical_file_unique, scan_tree
 from autoram.ranges import II
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
 
-config = configparser.ConfigParser()
+config = configparser.ConfigParser(allow_no_value=True, delimiters='=')
 config.read('autoram.ini')
 
 
@@ -36,16 +38,6 @@ def filter_no_pieces(torrents):
         if max(trr.pieceStates) > 1:
             gots_pieces.append(trr)
     return gots_pieces
-
-
-# def get_full_dict(short_dict: dict) -> dict:
-
-#     for size, files in short_dict.items():
-
-#         for file in files:
-
-#             if file.parent_hash == 'file':
-
 
 def construct_file_dict(torrents, dict_params):
     reg_exclude = config.get('behaviour', 'nono_regex')
@@ -339,3 +331,107 @@ def find_blocks_in_other_file(file1, file2):
         if blocks_found >= 3:
             return True
     return False
+
+def filterout_nometa_and_completeds(torrents: list) -> list:
+    torrents_filtered = []
+    total = len(torrents)
+    count = 0
+    for trr in torrents:
+        count += 1
+        print(f'quick filter {count} of {total} torrents ', end='\r')       
+        if trr.size <= 0 or trr.amount_left <=0:
+            continue
+        torrents_filtered.append(trr)
+    print()
+    return torrents_filtered
+
+
+
+def get_sizes_dict(torrents: list, dirs: str) -> Tuple[dict, list]:
+    sizes = {}
+    logger.info('scanning dirs')
+    add_sizes_dict_dirs(sizes, dirs)
+    logger.info('scanning torrents')
+    add_sizes_dict_qbt(sizes, torrents)
+
+
+    logger.info('filtering usable sizes from %s sizes', len(sizes))
+    hashes = set()
+    usable_sizes = {}
+    for size, files in sizes.items():
+
+        if len(files) <= 1:
+            continue
+
+        if count_existing_files(files) == 0:
+            continue
+
+        usable_sizes[size] = files
+        for file in files:
+            hashes.add(file.parent_hash)
+    logger.info('Usable sizes found %s from %s torrents',
+                len(usable_sizes), len(hashes))
+    return (usable_sizes, hashes)
+
+
+def add_sizes_dict_qbt(sizes: dict, torrents: list) -> None:
+    min_file_size = config.getint('behaviour', 'min_file_size') * 1024**2
+    total = len(torrents)
+    count = 0
+
+    for trr in torrents:
+        count += 1
+        if trr.size <= 0 or trr.amount_left <=0:
+            continue
+        
+        print(f'Extracting sizes {count} of {total} torrents ', end='\r')
+        for file in trr.files:
+            if file.size < min_file_size:
+                continue
+
+            if file.size not in sizes:
+                sizes[file.size] = []
+            file_path = get_full_client_path_for_torrent_file(trr, file)
+            sizes[file.size].append(FileOfSize(
+                size=file.size, path=file_path, parent_hash=trr.hash))
+    print()
+
+
+def add_sizes_dict_dirs(sizes: dict, dirs: list) -> None:
+    min_file_size = config.getint('behaviour', 'min_file_size') * 1024**2
+
+    if len(dirs) == 1 and dirs[0] == 'all':
+        dirs = config.get('client', 'all_local_dirs').split(' ')
+
+    for dir_ in dirs:
+        print(f'scanning {dir_}')
+        count = 0
+        for entry in scan_tree(dir_):
+            count += 1
+            print(f'{count} files ', end='\r')
+            if not entry.is_file:
+                continue
+
+            file_size = entry.stat(follow_symlinks=False).st_size
+            if file_size < min_file_size:
+                continue
+
+            if file_size not in sizes:
+                sizes[file_size] = []
+
+            sizes[file_size].append(FileOfSize(
+                size=file_size, path=entry.path, parent_hash='file'))
+        print()
+
+
+def count_existing_files(files: List[FileOfSize]) -> int:
+    count = 0
+    for file in files:
+        if file.parent_hash == 'file':
+            count += 1
+            continue
+
+        if os.path.isfile(file.path):
+            count += 1
+        # print(count, end=' ')
+    return count

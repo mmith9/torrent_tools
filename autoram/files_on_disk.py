@@ -7,6 +7,7 @@ import logging.config
 import os
 import shutil
 import io
+import typing
 import numpy as np
 
 from autoram.ranges import get_block_ranges, size_to_dib
@@ -14,10 +15,20 @@ from autoram.ranges import get_block_ranges, size_to_dib
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
 
-config = configparser.ConfigParser()
+config = configparser.ConfigParser(allow_no_value=True, delimiters='=')
 config.read('autoram.ini')
 buffer_size = config.getint('behaviour', 'buffer_size') * 1024*1024
 
+def create_drive_map(config) -> dict:
+    drive_map:dict = {}
+    options = config.options('drive_map')
+    for option in options:
+        value = config.get('drive_map', option)
+        drive_map[option] = value
+        drive_map[value] = option
+    return drive_map
+
+drive_map = create_drive_map(config)
 
 def extend_file(full_path_client, desired_size):
   # logger.debug('Extending to %s bytes, %s', desired_size, full_path_client)
@@ -383,65 +394,46 @@ def recheck_file_full(file, client=False, alt_file=False):
     print(
         f'{good_blocks} good {new_good_blocks} NEW good, blocks out of {all_blocks} total')
     print(f'and {new_bad_blocks} that were good are actuall bad')
-    return (good_blocks, new_good_blocks, bad_blocks, new_bad_blocks)
+    first_bad = new_piece_states[0] == 0
+    last_bad = new_piece_states[-1] == 0
+    return (good_blocks, new_good_blocks, bad_blocks, new_bad_blocks, first_bad, last_bad)
 
+def get_client_path_to_backup_dir(file:dict) -> str:
+    all_dirs = config.options('client_temp_dirs')    
+    all_dirs.extend(config.options('client_save_dirs'))    
+    file_path = file['full_path_client']
+    for dir in all_dirs:
+        print(dir)
+        if file_path.startswith(dir):            
+            backup_dir, _ = os.path.split(dir)
+            backup_dir = os.path.join(backup_dir, 'qbt_hammer')
+            return backup_dir
+    else:
+        logger.error('Could not find backup dir for file %s', file_path)
+        return False
 
 def get_full_client_path_for_torrent_file(torrent, file):
-    server_qbt_tempdir = config.get('server', 'qbt_tempdir')
-    client_qbt_tempdir = config.get('client', 'qbt_tempdir')
-    server_qbt_savedir = config.get('server', 'qbt_savedir')
-    client_qbt_savedir = config.get('client', 'qbt_savedir')
+    server_temp_path = torrent['download_path']
+    server_save_path = torrent['save_path']
 
-    if os.name == 'nt':
-        is_win = True
-    elif os.name == 'posix':
-        is_win = False
-    elif '\\' in client_qbt_savedir+client_qbt_tempdir:
-        is_win = True
-    elif '/' in client_qbt_savedir+client_qbt_tempdir:
-        is_win = False
+    for key, value in drive_map.items():
+        if server_temp_path.startswith(key):
+            client_temp_path=server_temp_path.replace(key, value)
+            break
     else:
-        logger.error('unknown system directory separator (/ or \\')
-        is_win = False
+        if drive_map:
+            logger.warning('bad temp path %s', server_temp_path)
 
-    #alt
-    #torrents_info.data[0]['content_path']
-    #'<mount_point>/<qbittorrent_tempdir>/<category_subdir>/<torrent_subdir>'
-
-    #torrents_info.data[0]['download_path']
-    #'<mount_point>/<qbittorrent_tempdir>/<category_subdir>'
-
-    #torrents_info.data[0]['save_path']
-    #'<mount_point>/<qbittorrent_savedir>/<category_subdir>'
-
-    #torrents_info.data[0].files.data[0]
-    #torrents_info.data[0].files.data[0]['name']
-    #'<torrent_subdir>/<file_name_without .!qB extension>'
-
-    temp_path = torrent['download_path']
-    save_path = torrent['save_path']
-
-    if temp_path.startswith(server_qbt_tempdir):
-        temp_path=temp_path.replace(server_qbt_tempdir, client_qbt_tempdir)
+    for key, value in drive_map.items():
+        if server_save_path.startswith(key):
+            client_save_path=server_save_path.replace(key, value)
+            break
     else:
-        logger.warning('bad temp path %s', temp_path)
-        temp_path = client_qbt_tempdir
+        if drive_map:
+            logger.warning('bad save path %s', server_temp_path)
 
-    if save_path.startswith(server_qbt_savedir):
-        save_path=save_path.replace(server_qbt_savedir, client_qbt_savedir)
-    else:
-        logger.warning('bad save path %s', save_path)
-        save_path = client_qbt_savedir
-
-    temp_path = os.path.join(temp_path, file.name)
-    save_path = os.path.join(save_path, file.name)
-
-    if is_win:
-        temp_path = temp_path.replace('/', '\\')    
-        save_path = save_path.replace('/', '\\')    
-    else:
-        temp_path = temp_path.replace('\\', '/')    
-        save_path = save_path.replace('\\', '/')    
+    temp_path = os.path.join(client_temp_path, file.name)
+    save_path = os.path.join(client_save_path, file.name)
 
     paths = [
         temp_path,

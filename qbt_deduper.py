@@ -12,13 +12,13 @@ import numpy as np
 from autoram.files_on_disk import get_full_client_path_for_torrent_file, recheck_file_full
 from autoram.qbt_api import connect_qbt
 from autoram.ranges import II
-from autoram.tr_payload import filter_no_meta, find_blocks_in_other_file
+from autoram.tr_payload import filter_no_meta, filterout_nometa_and_completeds, find_blocks_in_other_file
 from qbt_hammer import get_sizes_dict, rebuild_block
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
 
-config = configparser.ConfigParser()
+config = configparser.ConfigParser(allow_no_value=True, delimiters='=')
 config.read('autoram.ini')
 
 
@@ -250,11 +250,22 @@ def filter_only_common_sizes(local_files, torrent_files):
 
 
 def look_for_dupes_on_local_discs(files, torrents):
+    count_total = 0
+    count = 0
+    print('Counting possible matches')
+    for size in torrents:
+        for trr_file in torrents[size]:
+            for local_file in files[size]:
+                count_total +=1
+
     matches = []
     for size in torrents:
         for trr_file in torrents[size]:
             for local_file in files[size]:
+                count+=1
+                print(f'Pair {count} of {count_total} ', end ='\r')
                 if find_blocks_in_other_file(trr_file, local_file):
+                    print()
                     pair_info = do_something_with_match(trr_file, local_file)
                     matches.append((trr_file, local_file, pair_info))
     return matches
@@ -281,16 +292,34 @@ def do_something_with_match(trr_file, local_file):
         elif answer == 'l':
             args.later = True
 
-    if (args.auto or args.later) and args.verify:
+    if args.auto or args.later or args.verify:
         recheck = True
 
     if recheck:
+#return (good_blocks, new_good_blocks, bad_blocks, new_bad_blocks, first_bad, last_bad)        
         blocks_verified = recheck_file_full(
             trr_file, client=args.qbt_client, alt_file=local_file['full_path_client'])
 
+
     unmark = False
-    if not args.auto and not args.later:
-        answer = ''
+    answer = ''
+
+    if args.auto:
+        print('blocks verified', blocks_verified)
+        max_bad = 0
+        if blocks_verified[4]:
+            max_bad +=1
+        if blocks_verified[5]:
+            max_bad +=1
+
+        if blocks_verified[2] <= max_bad:
+            answer = 'u'
+            print('Auto unmark')
+        else:
+            answer = 's'
+            print('Auto skip')
+
+    if not args.later:
         while answer not in ['n', 'a', 'u', 'l', 's', 'r']:
             answer = input(
                 '(u)nmark download (n)ot (s)kip (l)ater (a)uto now (r)epair download using this file ?>').lower()
@@ -302,9 +331,6 @@ def do_something_with_match(trr_file, local_file):
             args.later = True
         elif answer == 'r':
             repair_torrent_using_local_file(trr_file, local_file)
-
-    if args.auto:
-        unmark = True
 
     if unmark:
         args.qbt_client.torrents_file_priority(
@@ -397,6 +423,8 @@ def main():
         torrents = qbt_client.torrents_info(filter='resumed')
     # torrents = qbt_client.torrents_info(torrent_hashes=test_hashes)
 
+    torrents = filterout_nometa_and_completeds(torrents)
+
     dict_of_sizes, filtered_hashes = get_sizes_dict(torrents, args.dirs)
     del torrents
     torrents = qbt_client.torrents_info(torrent_hashes=filtered_hashes)
@@ -472,7 +500,7 @@ if __name__ == "__main__":
     parser.add_argument('-tg_regex', dest='tg_regex', default='', type=str)
 
     parser.add_argument('-auto', action='store_true',
-                        help='autoresolve (un-download)')
+                        help='auto undownload if only last and or first are bad')
 
     parser.add_argument('-l', '--later', dest ='later', action='store_true',
                         help='scan first, ask later')
