@@ -5,7 +5,7 @@ import logging.config
 import os
 import re
 import time
-from typing import List, Tuple
+from typing import Any, List, Tuple
 from autoram.klasses import FileOfSize
 
 import numpy as np
@@ -15,10 +15,10 @@ from autoram.ranges import II
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
+print(__name__)
 
 config = configparser.ConfigParser(allow_no_value=True, delimiters='=')
 config.read('autoram.ini')
-
 
 def filter_no_meta(torrents):
     gots_meta = []
@@ -39,7 +39,7 @@ def filter_no_pieces(torrents):
             gots_pieces.append(trr)
     return gots_pieces
 
-def construct_file_dict(torrents, dict_params):
+def construct_file_dict(torrents, dict_params, disable_regex):
     reg_exclude = config.get('behaviour', 'nono_regex')
     reg_targets = dict_params['tg_regex']
     filemax = dict_params['filemax']
@@ -71,7 +71,7 @@ def construct_file_dict(torrents, dict_params):
             skip = False
             #skip = skip or file.priority == 0
             skip = skip or size < min_file_size
-            skip = skip or re.search(reg_exclude, file.name)
+            skip = skip or (not disable_regex and  re.search(reg_exclude, file.name))
             if skip:
                 file_offset += size
                 continue
@@ -387,6 +387,8 @@ def add_sizes_dict_qbt(sizes: dict, torrents: list) -> None:
         print(f'Extracting sizes {count} of {total} torrents ', end='\r')
         for file in trr.files:
             if file.size < min_file_size:
+                continue
+            if file.priority == 0:
                 continue
 
             if file.size not in sizes:

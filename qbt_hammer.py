@@ -128,6 +128,8 @@ def merge_multi_ready(files):
             continue
 
         blocks_fixed = loop_rebuild_block(file0, other_files)
+
+        logger.debug('hammer decision point')
         if len(blocks_fixed) > 0 :
             hashes_to_recheck.add(file0['hash'])
 
@@ -140,9 +142,11 @@ def merge_multi_ready(files):
 
         if end_now:
             continue
-
+        
+        logger.debug('entering hammer subroutine')
         blocks_hammered = loop_hammer_block(
             file0, other_files, blocks_fixed)
+        logger.debug('hammering subroutine exiting')
         if len(blocks_hammered) > 0:
             hashes_to_recheck.add(file0['hash'])
 
@@ -326,11 +330,14 @@ def loop_hammer_block(file0, files, blocks_fixed):
     num_blocks_hammered = 0
     blocks_hammered = []
     for blocknum, status in enumerate(file0['piece_states']):
+        logger.debug('considering block %s', blocknum)
         if blocknum in blocks_fixed:
             print('O', end='')
             continue
         if status != 2:
+            logger.debug('hammering block %s', blocknum)
             rebuilt = hammer_block(file0, blocknum, files)
+            logger.debug('hammering done')
             if rebuilt:
                 blocks_hammered.append(blocknum)
                 num_blocks_hammered += 1
@@ -343,10 +350,17 @@ def loop_hammer_block(file0, files, blocks_fixed):
     print('blocks hammered:', num_blocks_hammered)
     return blocks_hammered
 
+def print_debug(text:str, end:str='\n')->None:
+    if logger.getEffectiveLevel()<=logging.DEBUG:
+        print(text, end=end)
+
+def input_debug():
+    if logger.getEffectiveLevel()<=logging.DEBUG:
+        input('Enter')
 
 def hammer_block(source_file, blocknum, source_files):
-  # logger.debug('------- block --------- ')
-    # logger.debug('blocknum %s', blocknum)
+    logger.debug('------- block --------- ')
+    logger.debug('blocknum %s', blocknum)
     all_files = []
     all_files.append(source_file)
     all_files.extend(source_files)
@@ -361,64 +375,84 @@ def hammer_block(source_file, blocknum, source_files):
             block_pool.append(block)
 
     check_ranges = [need_ranges]
-    # logger.debug(' check ranges %s', len(check_ranges))
+    logger.debug('parent file check ranges %s', len(check_ranges))
+    copies_ranges = []
     for file in source_files:
         possible_ranges = need_ranges & file['ranges_complete']
         if possible_ranges != II.empty():
-            check_ranges.append(possible_ranges)
-    # logger.debug(' check ranges %s', len(check_ranges))
+            copies_ranges.append(possible_ranges)
+    logger.debug('copies ranges %s', len(check_ranges))
+    check_ranges.extend(copies_ranges)
+    logger.debug('combined ranges %s', len(check_ranges))
 
     shifted_atomic_ranges = []
     for ranges in check_ranges:
         for atomic in ranges:
-            atomic = II.closed(atomic.lower - need_ranges.lower,
+            atomic_shifted = II.closed(atomic.lower - need_ranges.lower,
                                atomic.upper-need_ranges.lower)
-            shifted_atomic_ranges.append(atomic)
-    # logger.debug(' shifted atomic ranges %s', len(shifted_atomic_ranges))
+            shifted_atomic_ranges.append(atomic_shifted)
+    del check_ranges
+    logger.debug('combined shifted atomic ranges %s', len(shifted_atomic_ranges))
 
+    print_debug('Detecting zero ranges in possible blocks', end=' ')
     for data_block in block_pool:
         max_subblock_size = int(
             len(data_block) / (2 ^ config.getint('behaviour', 'slicing_depth')))
-        ranges = detect_non_zero_ranges_in_block(data_block, max_subblock_size)
-        # print(ranges, end=' ')
-        for atomic in ranges:
-            atomic = II.closed(atomic.lower, atomic.upper)
-            shifted_atomic_ranges.append(atomic)
-    # logger.debug(' shifted atomic ranges %s', len(shifted_atomic_ranges))
+        zero_ranges = detect_non_zero_ranges_in_block(data_block, max_subblock_size)
+        print_debug(zero_ranges, end=' ')
+        for atomic in zero_ranges:
+            atomic_shifted = II.closed(atomic.lower, atomic.upper)
+            shifted_atomic_ranges.append(atomic_shifted)
+    print_debug('')
+    logger.debug('Total shifted atomic ranges %s', len(shifted_atomic_ranges))
 
     hammer_ranges = []
     shifted_atomic_ranges = list(set(shifted_atomic_ranges))
+    logger.debug('Total deduped shifted atomic ranges %s', len(shifted_atomic_ranges))
+
     while len(shifted_atomic_ranges) > 0:
-        # print('*', len(shifted_atomic_ranges), end='')
+        print_debug(f'*{len(shifted_atomic_ranges)} ', end=' ')
         atomic0 = shifted_atomic_ranges.pop()
         no_overlap = True
         for atomic in reversed(shifted_atomic_ranges):
+            if atomic0 == atomic:
+                shifted_atomic_ranges.remove(atomic)
+                continue                
             if atomic0 & atomic != II.empty():
+                print_debug('overlap of ', end ='')
+                print_debug(atomic0, end=' ')
+                print_debug(atomic, end=' ')
                 no_overlap = False
                 shifted_atomic_ranges.remove(atomic)
+                print_debug('fission to: ', end ='')
                 for fission in [atomic0 - atomic, atomic - atomic0, atomic0 & atomic]:
                     if fission != II.empty():
                         for subatomic in fission:
+                            print_debug(subatomic, end =' ')
                             shifted_atomic_ranges.append(
                                 II.closed(subatomic.lower, subatomic.upper))
+                print_debug(':end')
+                print_debug(shifted_atomic_ranges)
+                input_debug()
+                break
         if no_overlap:
             hammer_ranges.append(atomic0)
-    # print('\n')
+    print_debug('\n')
     hammer_ranges.sort(key=lambda x: x.lower)
-    # logger.debug('got %s atomic ranges to work with', len(hammer_ranges))
-    # logger.debug('block of %s split into %s',block_size,  len(hammer_ranges))
-    # print(hammer_ranges)
+    logger.debug('got %s atomic ranges to work with', len(hammer_ranges))
+    logger.debug('block of %s split into %s',block_size,  len(hammer_ranges))
+    print_debug(hammer_ranges)
 
     block_matrix = {}
-    # logger.debug('hammer ranges %s', hammer_ranges)
+    logger.debug('hammer ranges %s', hammer_ranges)
     for atomic in hammer_ranges:
 
-        # logger.debug('atomic %s', atomic)
-        # logger.debug('block pool is %s', len(block_pool))
+        logger.debug('atomic %s', atomic)
+        logger.debug('block pool is %s', len(block_pool))
         block_matrix[atomic] = []
         for block in block_pool:
-            # logger.debug(block)
-            # logger.debug('block length %s', len(block))
+            logger.debug(block)
+            logger.debug('block length %s', len(block))
             new_atomic_block = block[atomic.lower:atomic.upper+1]
             is_dupe = False
             for existing_atomic_block in block_matrix[atomic]:
@@ -428,47 +462,47 @@ def hammer_block(source_file, blocknum, source_files):
             if not is_dupe:
                 block_matrix[atomic].append(new_atomic_block)
 
-    # logger.debug('block map')
+    logger.debug('block map')
     variants = 1
     for atomic in hammer_ranges:
         variants *= len(block_matrix[atomic])
-        # print(f'range: {atomic} of {len(block_matrix[atomic])} variants')
-    # if variants == 1:
-        # logger.debug('only 1 variant,, bailing')
-        # return False
+        print_debug(f'range: {atomic} of {len(block_matrix[atomic])} variants')
+    if variants == 1:
+        logger.debug('only 1 variant,, bailing')
+        return False
 
-  # logger.debug('Possible %s variants to hammer', variants)
+    logger.debug('Possible %s variants to hammer', variants)
 
     counters = {}
     test_range = II.empty()
-    # logger.debug('blocksize %s', block_size)
+    logger.debug('blocksize %s', block_size)
     hammered_block = np.zeros(block_size, dtype=np.ubyte)
-    # logger.debug('hammering block of size %s', len(hammered_block))
+    logger.debug('hammering block of size %s', len(hammered_block))
     for x in hammer_ranges:
         counters[x] = 0
         test_range = test_range | x
         hammered_block[x.lower:x.upper+1] = block_matrix[x][0]
 
-    # logger.debug('need %s hammer is %s', need_ranges, test_range)
+    logger.debug('need %s hammer is %s', need_ranges, test_range)
 
     is_shared_block = (blocknum == 0 and source_file['first_block_shared']) or \
         (blocknum == len(source_file['piece_states'])
          and source_file['last_block_shared'])
-  # logger.debug('block %s , shared? %s', blocknum, is_shared_block)
+    logger.debug('block %s , shared? %s', blocknum, is_shared_block)
 
     # check if long 0 patch exists
     # if args.hammer.fail.quick
     for atomic in hammer_ranges:
         bm_a = block_matrix[atomic]
         if len(bm_a) == 1 and len(bm_a[0] > 1000) and not np.any(bm_a[0]):
-          # logger.debug('Big unavoidable chain of 0, quick skip')
-            # means there is unavoidable chain of 1000 zeros = most likely cant hammer
+            logger.debug('Big unavoidable chain of 0, quick skip')
+        #    means there is unavoidable chain of 1000 zeros = most likely cant hammer
             return False
 
-    # print('!', end='')
+    
+    print_debug('!', end='')
     while True:
-
-        # print('`', end='')
+        print_debug('`', end='')
         if is_shared_block:
             block_fixed = verify_block_shared(
                 source_file, blocknum=blocknum, 
@@ -478,20 +512,20 @@ def hammer_block(source_file, blocknum, source_files):
         else:
             block_fixed = verify_block(
                 source_file, blocknum=blocknum, block_data=hammered_block)
-            # print('verify ', block_fixed)
+            print_debug(f'verify {block_fixed}')
 
-        # print('`', end='')
+        print_debug('`', end='')
         if block_fixed:
-            # print('#########################')
-            # logger.debug('block %s fixed', blocknum)
+            print_debug('#########################')
+            logger.debug('block %s fixed', blocknum)
             result = write_block(source_file, blocknum, hammered_block)
-            # print('#########################')
+            print_debug('#########################')
             return result
 
-        # print('`', end='')
+        print_debug('`', end='')
         all_zeroed = True
         for x in hammer_ranges:
-            #print('.', end='')
+            print_debug('.', end='')
             counters[x] += 1
             if counters[x] >= len(block_matrix[x]):
                 counters[x] = 0
@@ -503,12 +537,12 @@ def hammer_block(source_file, blocknum, source_files):
                 all_zeroed = False
                 break
 
-        # print('`', end='')
+        print_debug('`', end='')
         if all_zeroed:
-            print()
+            print_debug()
             break
 
-  # logger.debug('looping complete hammer failed')
+    logger.debug('looping complete hammer failed')
     return False
 
 
@@ -610,11 +644,11 @@ dest: {file0['filename']}
         args.qbt_client.torrents_set_category(category=file0['category'], torrent_hashes=file['hash']) 
 
         args.qbt_client.torrents_add_tags(
-            torrent_hashes=file['hash'], tags='_ram_clone')
+            torrent_hashes=file['hash'], tags=['_ram_clone', '_cmp'])
         hashes_to_recheck.append(file['hash'])
 
     args.qbt_client.torrents_add_tags(
-        torrent_hashes=file0['hash'], tags='_ram_parent')
+        torrent_hashes=file0['hash'], tags=['_ram_parent', '_cmp'])
     hashes_to_recheck.append(file0['hash'])
 
     return hashes_to_recheck
@@ -649,7 +683,7 @@ def main():
     }
 
     logger.info('construct file dict')
-    file_dict = construct_file_dict(torrents, dict_params)
+    file_dict = construct_file_dict(torrents, dict_params, args.disable_regex)
     merge_list = find_files_to_merge(file_dict)
 
     print(f'groups: {len(merge_list)} of ', end='')
@@ -718,16 +752,31 @@ if __name__ == "__main__":
     parser.add_argument('-v','--verify', default=False, action='store_true',
                         help='Check if any new blocks appeared')
 
-    parser.add_argument('-debug', dest='debug', action='store_true')
+    parser.add_argument('-debug', dest='debug', action='store_true', default=False)
 
     parser.add_argument('-tg_regex', dest='tg_regex', default='', type=str)
+
+    parser.add_argument('-disable_regex', action='store_true', default=False, help='Disable exclude regexes')
 
     parser.add_argument('-auto', action='store_true')
 
     args = parser.parse_args()
 
+    #print(__name__)
+    #logger.debug('init check')
+
     if args.debug:
+        #print(logger.getEffectiveLevel())
+        print('turning debug on')
         logger.setLevel(logging.DEBUG)
+    logger.debug('.')
+    logger.info('.')
+    logger.warning('.')
+    logger.error('.')
+    logger.critical('.')
+    print('debug level is', logger.getEffectiveLevel())
+    print_debug('print on debug passed')
+        
 
     if args.hardmerge and args.crossmerge:
         print('hardmerge and crossmerge are mutually exclusive')

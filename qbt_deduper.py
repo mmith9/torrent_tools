@@ -5,6 +5,7 @@ import logging.config
 import os
 import re
 import shutil
+import sys
 import time
 
 import numpy as np
@@ -23,41 +24,45 @@ config.read('autoram.ini')
 
 
 def construct_file_dict(torrents, dict_params):
-    reg_exclude = config.get('behaviour', 'nono_regex')
-    filemax = dict_params['filemax']
+    
     torrents = filter_no_meta(torrents)
     file_dict_raw = {}
     logger.info('Processing %s torrents', len(torrents))
     logger.info('Building sizes dictionary')
     count_files = 0
-    if args.min_size:
-        min_file_size = args.min_size * 1024*1024
-    else:
-        min_file_size = config.getint('behaviour', 'min_file_size') * 1024*1024
+
+    reg_exclude = '^alwaysfalse$' if args.disable_regex else config.get('behaviour', 'nono_regex')
+    filemax = args.file_max if args.file_max else dict_params['filemax']
+    min_file_size = args.min_size if args.min_size else config.getint('behaviour', 'min_file_size')
+    min_file_size *= 1024*1024
+
+    count_trrs = len(torrents)
+    count=0
+    count_all_files=0    
 
     for trr in torrents:
-        print('_', end='')
+        count_files = 0
+        count+=1
         file_offset = 0
 
-        if filemax and count_files >= filemax:
+        if filemax and count_all_files >= filemax:
             logger.debug('filemax of %s hit', filemax)
             break
 
         for file in trr.files:
-            count_files += 1
+            count_files+=1
+            count_all_files += 1
             size = file.size
-            print('.', end='')
 
-            skip = False
-            skip = skip or file.priority == 0
-            skip = skip or size < min_file_size
-            skip = skip or re.search(reg_exclude, file.name)
+            skip = (file.priority == 0)
+            skip = skip or (size < min_file_size)
+            skip = skip or (re.search(reg_exclude, file.name, flags=re.IGNORECASE))
             if skip:
                 file_offset += size
                 continue
 
+            print(f'torrent {count} of {count_trrs} and {count_files} files', end='\r')
             insert = (trr, file, file_offset)
-
             if size not in file_dict_raw:
                 file_dict_raw[size] = []
 
@@ -273,10 +278,11 @@ def look_for_dupes_on_local_discs(files, torrents):
 
 def do_something_with_match(trr_file, local_file):
     print('--------------')
-    print('possible match')
-    print(f'torrent: {trr_file["filename"]}')
-    print(f'local file: {local_file["filename"]}')
-    print(f'where: {local_file["full_path_client"]}')
+    #print('possible match')
+    print(f"torrent {trr_file['torrent'].name}")
+    print(f'file: {trr_file["filename"]}')
+#    print(f'local file: {local_file["filename"]}')
+    print(f'local file: {local_file["full_path_client"]}')
 
     blocks_verified = False
     recheck = False
@@ -508,13 +514,27 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verify', dest='verify', default=False, action='store_true',
                         help='Full verify found suspects')
 
-    parser.add_argument('-s', '--min_size', dest='min_size', default=False, type =int,
+    parser.add_argument('-s', '--min_size', dest='min_size', default=0, type =int,
                         help='min size in MiB to bother (override config)')
+
+    parser.add_argument('-f', '--file_max', dest='file_max', default=0, type =int,
+                        help='maximum number of files (for testing) to process')
+
+    parser.add_argument('-disable_regex', action='store_true', default=False, help='Disable exclude regexes')
 
     args = parser.parse_args()
 
+
     if args.debug:
         logger.setLevel(logging.DEBUG)
+
+    if args.dirs == ['all']:
+        args.dirs = config.get('client', 'all_local_dirs').split(' ')
+
+    for a_dir in args.dirs:
+        if not os.path.isdir(a_dir):
+            logger.error('No dir %s', a_dir)
+            sys.exit(0)
 
     time_start = time.time()
     main()
