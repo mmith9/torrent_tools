@@ -8,7 +8,7 @@ import os
 import hashlib
 import datetime
 import bencode
-
+from connect_qb import connect_qb
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARN)
@@ -48,26 +48,83 @@ class Torrent:
         self.db_numfiles: int
         self.db_id: int
 
-    def save_file_to(self, dest_dir, filename=''):
+    def add_self_to_local_qbittorrent(self, category='', tag='') -> bool:
+        try:
+            # print()
+            # print('connecting')
+            qbt_client = connect_qb('192.168.2.206')
+            # print('connected')
+
+            result = qbt_client.torrents_add(torrent_files=self.torfile, \
+                category=category, \
+                is_paused=True, \
+                use_auto_torrent_management=True, \
+                is_sequential_download=True, \
+                is_first_last_piece_priority=True,\
+                tags=['fresh', tag], 
+                )
+            
+            return True            
+        except Exception as err:
+            print('Failed to add torrent to qbt')
+            print(self.fl_hexhash)
+            print(err)
+            return False
+
+    def save_file_to(self, dest_dir, filename='') -> str:
         if not filename:
             torinfo = bencode.bdecode(self.torfile)
             filename = torinfo['info']['name']
-        if isinstance(filename, bytes):
+
+            if len(filename)>255:
+                print('\nTruncating long filename')
+                print(filename)
+                if filename.endswith('.torrent'):
+                    filename = filename[:-len('.torrent')]
+
+                while len(filename) + len('.torrent') > 255:
+                    filename = filename[:-1]
+                filename = filename + '.torrent'
+                print(filename)
+
+        if isinstance(filename, bytes) or isinstance(dest_dir, bytes):
+            if isinstance(dest_dir, str):
+                dest_dir = bytes(dest_dir, 'utf-8')
+            if isinstance(filename, str):
+                filename = bytes(filename, 'utf-8')
             for bad_char in bytes('*?\\/\";:|,\'<>', 'utf-8'):
                 filename = filename.replace(bytes(str(bad_char), 'utf-8'), bytes('!', 'utf-8'))
             filename += bytes('.torrent', 'utf-8')
-            typed_dest_dir = bytes(dest_dir, 'utf-8')
         else:
             for bad_char in '*?\\/\";:|,\'<>':
                 filename = filename.replace(bad_char, '!')
             filename += '.torrent'
-            typed_dest_dir = dest_dir
 
         if not os.path.exists(dest_dir):
             os.makedirs(dest_dir)
-        file_h = open(os.path.join(typed_dest_dir, filename), 'wb')
-        file_h.write(self.torfile)
-        file_h.close()
+        final_file_path = os.path.join(dest_dir, filename)
+        try:
+            file_h = open(final_file_path, 'wb')
+            file_h.write(self.torfile)
+            file_h.close()
+            return final_file_path
+        except Exception as err:
+            print('Torrent file cant be saved')
+            print(final_file_path)
+            print('because of')
+            print(err)
+            print()
+            if isinstance(dest_dir, bytes):
+                final_file_path = os.path.join(dest_dir, bytes(self.fl_hexhash + '_error.torrent', 'utf-8'))
+            else:
+                final_file_path = os.path.join(dest_dir, self.fl_hexhash + '_error.torrent')
+            print('using name')
+            print(final_file_path)
+            print()
+            file_h = open(final_file_path, 'wb')
+            file_h.write(self.torfile)
+            file_h.close()
+            return final_file_path
 
     def load_torrent_file_info(self, file_name: str):
         try:
@@ -88,14 +145,15 @@ class Torrent:
     def digest_torfile(self):
         try:
             self.torinfo = bencode.bdecode(self.torfile)
-        except bencode.BencodeDecodeError:
-            logger.critical('Failed to de-ben-code %s', self.filename)
+        except Exception as err:
+#            logger.critical('Failed to de-ben-code %s', self.filename)
+            logger.error('debencode fail: %s',err)
             return False
         try:
             self.info = self.torinfo['info']
             self.fl_name = self.info['name']
         except (KeyError, TypeError) as err:
-            logger.critical('error processing file %s', self.filename)
+#            logger.critical('error processing file %s', self.filename)
             logger.critical('encountered error %s', err)
             return False
 
@@ -326,3 +384,12 @@ class Torrent:
         else:
             truename_found = False
         return truename_found
+
+def size_to_dib(size):
+    index = 0
+    new_size = int(size / 1024)
+    while new_size >= 1024:
+        new_size = int(new_size / 1024)
+        index += 1
+    new_size = str(new_size) + [' KiB', ' MiB', ' GiB', ' TiB'][index]
+    return new_size

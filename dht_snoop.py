@@ -326,6 +326,9 @@ class Resolver:
         self.session_settings['listen_queue_size'] = 5  # 5
         self.session_settings['torrent_connect_boost'] = 3  # 30
         self.session_settings['max_concurrent_http_announces'] = 50  # 50
+        self.session_settings['enable_upnp'] = False #true
+        self.session_settings['enable_lsd'] = False #true
+        
         # self.session_settings['dht_max_dht_items'] = 70000  # 700
         # self.session_settings['dht_max_torrent_search_reply'] = 50  # 20
         # self.session_settings['dht_block_ratelimit'] = 100  # 5
@@ -480,7 +483,8 @@ class Resolver:
         job = self.jobs_to_resolve.pop(0)
 
 #        print(len(job.hexhash), f'>{job.hexhash}<')
-        self.lt_params.info_hash = libtorrent.sha1_hash(binascii.a2b_hex(job.hexhash))
+        self.lt_params.info_hash = libtorrent.sha1_hash(
+            binascii.a2b_hex(job.hexhash))
         self.lt_params.name = "name_" + job.hexhash
         job.trackers = self.trackers.get_random(1)
         urls = []
@@ -488,19 +492,12 @@ class Resolver:
             tracker['uses'] +=1
             urls.append(tracker['url'])
         self.lt_params.trackers = urls
-        try:
-            job.handle = self.lt_session.add_torrent(self.lt_params)
-            job.handle.resume()
-            self.active_jobs.append(job)
-            _cur_trackers = job.handle.trackers()
-            self.last_job_spawn = time.time()
+        job.handle = self.lt_session.add_torrent(self.lt_params)
 
-        except Exception as err:
-            print(err)
-            print(job)
-            print(job.hexhash)
-            print(self.lt_params.info_hash)
-            print(self.lt_params)
+        job.handle.resume()
+        self.active_jobs.append(job)
+        _cur_trackers = job.handle.trackers()
+        self.last_job_spawn = time.time()
 
         logger.debug('hashes %s, running %s', 
                      len(self.jobs_to_resolve), len(self.active_jobs))
@@ -580,7 +577,7 @@ class Resolver:
             or until jobs are done (unlikely)
         """
 
-        while self.active_jobs or self.jobs_to_resolve :
+        while True: #self.active_jobs or self.jobs_to_resolve :
             if self.can_spawn_job():
                 if self.jobs_to_resolve:
                     self.spawn_a_job()
@@ -671,20 +668,28 @@ class Resolver:
                 # elif job.is_timeout():
                 #     self.enqueue_a_job(job)
 
-                self.print_stats_inline()
+                #self.print_stats_inline()
                 if args.maxnew == 0 and len(self.active_jobs) == 0:
                     print('\n\n')
                     sys.exit(0)
-            self.print_stats_inline()
+            #self.print_stats_inline()
 
     def prep_sniffer(self):
 
         alert_mask = libtorrent.alert.category_t.dht_notification
-        alert_mask+= libtorrent.alert.category_t.peer_notification
+        alert_mask = 65535
         self.lt_session.set_alert_mask(alert_mask)
         self.is_sniffing = True
+        self.ignore_alerts.add('torrent_log_alert')
+        self.ignore_alerts.add('peer_log_alert')
         # self.ignore_alerts.add('dht_reply_alert')
-        # self.ignore_alerts.add('dht_outgoing_get_peers_alert')
+        self.ignore_alerts.add('dht_outgoing_get_peers_alert')
+        self.ignore_alerts.add('stats_alert')
+        self.ignore_alerts.add('peer_disconnected_alert')
+        self.ignore_alerts.add('peer_connect_alert')
+        self.ignore_alerts.add('incoming_connection_alert')
+        self.ignore_alerts.add('dht_get_peers_alert')
+        #self.ignore_alerts.add('')
         #self.ignore_alerts.add('')
 
     def handle_sniffer(self):
@@ -696,26 +701,28 @@ class Resolver:
 
     def handle_alert(self, alert):
         alert_type = type(alert).__name__
-        # if alert_type in self.ignore_alerts:
-        #     return
+        if alert_type in self.ignore_alerts:
+            return
 
-#         if alert_type != 'dht_get_peers_alert':
-#             print(f'\n{alert_type}, {alert.message()}')
-#             return
 
-        #print(f'\n{alert_type}, {alert.message()}')
-        if alert_type not in ['dht_announce_alert', 'peer_announce_alert']:
+        print(f'\n{alert_type}, {alert.message()}')
+
+        if alert_type != 'dht_announce_alert':
+#            print(f'\n{alert_type}, {alert.message()}')
             return
 
         try:
             byte_hash = alert.info_hash.to_string()
+            port = alert.port
+            ip = alert.ip
         except Exception as err:
             print(err)
             return
 
         if byte_hash not in self.known_hashes:            
             self.known_hashes.add(byte_hash)
-#            print(f'\nNew hash {byte_hash.hex().lower()}')
+            
+            print(f'New hash {byte_hash.hex().lower()} {ip}:{port}')
             self.count.increase('scraped')
             if self.is_scraped_hash_new(byte_hash):
                 self.count.increase('scraped_new')
@@ -752,9 +759,16 @@ def main():
     resolver.prep_sniffer()
     while True:
         resolver.get_trackers()
-        resolver.load_jobs()
+        #resolver.load_jobs()
+    
+        a_job = Job()
+        a_job.hexhash = 'bed4cca28e993f12fe92324b2dc4cb20269e0aab'
+        a_job.hexhash = '1111111111111111111111111111111111111111'
+        a_job.action = ''
+        a_job.total_runtime = 0
+        a_job.priority = 0
+        resolver.jobs_to_resolve.append(a_job)        
         
-        resolver.sort_jobs()
         resolver.run_loop()
         logger.info('Cycle complete, trying to get new jobs')
         resolver.save_trackers()

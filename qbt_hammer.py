@@ -539,7 +539,7 @@ def hammer_block(source_file, blocknum, source_files):
 
         print_debug('`', end='')
         if all_zeroed:
-            print_debug()
+            print_debug('')
             break
 
     logger.debug('looping complete hammer failed')
@@ -621,25 +621,30 @@ def hard_merge(file0, all_files):
 
             with open(
                 os.path.join(backup_dir,f'log_{time_now}.txt'), 'a', encoding='utf-8') as fh:
-
-                fh.writelines(f'''
----------
-epoch: {int(time.time())}
-hash1: {file['hash']}
-torrent1: {file['torrent'].name}
-file1: {file['filename']}
-old path: {file['full_path_client']}
-new path: {new_path_client}
-dest: {file0['filename']}
-
-        ''')
+                log_msg = f"---------\nepoch: {int(time.time())}\nhash1: {file['hash']}\ntorrent1: {file['torrent'].name}"
+                log_msg+= f"file1: {file['filename']}\nold path: {file['full_path_client']}\nnew path: {new_path_client}"
+                log_msg+= f"dest: {file0['filename']}\n"
+                fh.write(log_msg)
 
         logger.info('Renaming file in qbittorrent')
-        args.qbt_client.torrents_rename_file(
-            torrent_hash=file['hash'], file_id=file['id'],
-            old_path=file['path_server'],
-            new_path=file0['path_server']
-        )
+
+        try:
+            args.qbt_client.torrents_rename_file(
+                torrent_hash=file['hash'], file_id=file['id'],
+                old_path=file['path_server'],
+                new_path=file0['path_server']
+            )
+        except Exception as err:
+            msg = f'''
+RENAME FAILED
+from>
+{file['path_server']},
+to>
+{file0['path_server']}
+because>
+{err}
+'''
+            print(msg)
 
         args.qbt_client.torrents_set_category(category=file0['category'], torrent_hashes=file['hash']) 
 
@@ -777,6 +782,8 @@ if __name__ == "__main__":
     print('debug level is', logger.getEffectiveLevel())
     print_debug('print on debug passed')
         
+    import autoram.tr_payload
+    autoram.tr_payload.args = args
 
     if args.hardmerge and args.crossmerge:
         print('hardmerge and crossmerge are mutually exclusive')

@@ -38,7 +38,7 @@ def construct_file_dict(torrents, dict_params):
 
     count_trrs = len(torrents)
     count=0
-    count_all_files=0    
+    count_all_files=0
 
     for trr in torrents:
         count_files = 0
@@ -86,10 +86,16 @@ def construct_file_dict_raw_part2(file_dict_raw):
             full_path_client = get_full_client_path_for_torrent_file(trr, file)
             try:
                 file_is_complete = file.progress == 1
-                complete_file_exists = os.path.isfile(full_path_client)
-                incomplete_file_exists = os.path.isfile(
-                    full_path_client + '.!qB')
+                if full_path_client.endswith('.!qB'):                    
+                    complete_file_exists = False
+                    incomplete_file_exists = os.path.isfile(full_path_client)
+                else:
+                    complete_file_exists = os.path.isfile(full_path_client)
+                    incomplete_file_exists = os.path.isfile(full_path_client + '.!qB')
 
+                # print('--')
+                # print(full_path_client)
+                # print(complete_file_exists)
                 # print(f't{trr.hash[:4]}f{file["id"]}')
                 if not file_is_complete and complete_file_exists:
                     logger.warning(
@@ -102,8 +108,6 @@ def construct_file_dict_raw_part2(file_dict_raw):
                         'file complete but does not exist %s', file.name)
 
                 if not file_is_complete:
-                    if not full_path_client.lower().endswith('.!qb'):
-                        full_path_client += '.!qB'
                     file_exists = incomplete_file_exists
                 else:
                     file_exists = complete_file_exists
@@ -138,7 +142,7 @@ def construct_file_dict_raw_part2(file_dict_raw):
 
             is_last_block_shared = (file_offset + file.size != trr.size) and \
                 (((file_offset + file.size + 1) % piece_size) != 0)
-            #pieces_offset = -(file_offset % trr.properties.piece_size)
+
             insert = {'file': file,
                       'torrent': trr,
                       'id': file['id'],
@@ -195,9 +199,12 @@ def construct_file_dict_from_size_dict(sizes_dict):
     return filedict
 
 def scan_local_discs(dirs):
+    assert False
     logger.info('scanning dirs and building sizes dict')
     filedict = {}
-    extensions = ['.mkv', '.mp4', '.m4v', '.wmv', '.avi', '.mpg']
+    # extensions = ['.mkv', '.mp4', '.m4v', '.wmv', '.avi', '.mpg']
+    reg_exclude = '^alwaysfalse$' if args.disable_regex else config.get('behaviour', 'nono_regex')
+    print(reg_exclude)
     if args.min_size:
         min_file_size = args.min_size * 1024*1024
     else:
@@ -207,9 +214,13 @@ def scan_local_discs(dirs):
         for path, _, files in os.walk(dir):
             for file in files:
 
-                print('.', end='')
-                ext = file[-4:]
-                if ext not in extensions:
+                # print('.', end='')
+                # ext = file[-4:]
+                # if ext not in extensions:
+                #     continue
+
+                if re.search(reg_exclude, file):
+                    print(f'exluding {file}')
                     continue
 
                 file_path = os.path.join(path, file)
@@ -268,7 +279,10 @@ def look_for_dupes_on_local_discs(files, torrents):
         for trr_file in torrents[size]:
             for local_file in files[size]:
                 count+=1
-                print(f'Pair {count} of {count_total} ', end ='\r')
+                print(f'Pair {count} of {count_total} ')
+                print('-----')
+                print(f'trr file> {trr_file["filename"]}')
+                print(f'loc file> {local_file["filename"]}')
                 if find_blocks_in_other_file(trr_file, local_file):
                     print()
                     pair_info = do_something_with_match(trr_file, local_file)
@@ -306,24 +320,27 @@ def do_something_with_match(trr_file, local_file):
         blocks_verified = recheck_file_full(
             trr_file, client=args.qbt_client, alt_file=local_file['full_path_client'])
 
-
+    
     unmark = False
     answer = ''
 
     if args.auto:
-        print('blocks verified', blocks_verified)
-        max_bad = 0
-        if blocks_verified[4]:
-            max_bad +=1
-        if blocks_verified[5]:
-            max_bad +=1
-
-        if blocks_verified[2] <= max_bad:
-            answer = 'u'
-            print('Auto unmark')
-        else:
+        if not blocks_verified:
             answer = 's'
-            print('Auto skip')
+        else:
+            print('blocks verified', blocks_verified)
+            max_bad = 0
+            if blocks_verified[4]:
+                max_bad +=1
+            if blocks_verified[5]:
+                max_bad +=1
+
+            if blocks_verified[2] <= max_bad:
+                answer = 'u'
+                print('Auto unmark')
+            else:
+                answer = 's'
+                print('Auto skip')
 
     if not args.later:
         while answer not in ['n', 'a', 'u', 'l', 's', 'r']:
@@ -527,6 +544,9 @@ if __name__ == "__main__":
 
     if args.debug:
         logger.setLevel(logging.DEBUG)
+        for name in ['autoram.files_on_disk', 'autoram.tr_payload']:
+            loggie = logging.getLogger(name)
+            loggie.setLevel(logging.INFO)
 
     if args.dirs == ['all']:
         args.dirs = config.get('client', 'all_local_dirs').split(' ')
@@ -536,6 +556,8 @@ if __name__ == "__main__":
             logger.error('No dir %s', a_dir)
             sys.exit(0)
 
+    import autoram.tr_payload
+    autoram.tr_payload.args = args
     time_start = time.time()
     main()
     time_end = time.time()

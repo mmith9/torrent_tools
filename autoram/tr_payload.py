@@ -271,19 +271,24 @@ def find_blocks_in_other_file(file1, file2):
     # logger.debug('offset %s blocksize %s', file2['file_offset'], size_to_dib(file2['piece_size']))
 
     if not os.path.isfile(file2['full_path_client']):
-      # logger.debug('file2 not found')
+        logger.error('file2 %s not found', file2['full_path_client'])
         return False
 
     ranges = file2['ranges_complete']
-
+    logger.debug('file2 ranges %s', ranges)
     # logger.debug('got %s ranges', len(ranges))
     if not ranges:
-        # logger.debug('ranges empty')
+        logger.info('ranges empty')
         return False
 
+#    print('comparing blocks')
     piece_size = file1['piece_size']
+#    print('piece size', piece_size)
     file_offset = file1['file_offset']
-    pieces_offset = -(file_offset % piece_size)
+#    print('file offset', file_offset)
+
+    pieces_offset = file1['pieces_offset']
+#    print('piece offset', pieces_offset)
 
     pieces_start = file1['pieces_start']
     torrent_hashes = file1['torrent'].piece_hashes
@@ -292,31 +297,42 @@ def find_blocks_in_other_file(file1, file2):
     if pieces_offset < 0:
         blocknum = 1
 
+    padded_blocks_found = 0
     blocks_found = 0
     tries = 0
     max_tries = 10
     while (blocknum+1)*piece_size + pieces_offset < file1['size']:
         if tries >= max_tries:
-          # logger.debug('Failed %s times, skipping', max_tries)
+            logger.debug('Failed %s times, skipping', max_tries)
             return False
 
         byte_start = blocknum*piece_size + pieces_offset
         byte_end = (blocknum+1)*piece_size + pieces_offset
 
         block_range = II.closedopen(byte_start, byte_end)
+        logger.debug('seeking range %s', block_range)
         if block_range not in ranges:
             blocknum += 1
             continue
 
         hash1 = torrent_hashes[blocknum + pieces_start]
-        # logger.debug('%s hash read %s', hash1, blocknum + pieces_start)
+        logger.debug('%s hash read %s', hash1, blocknum + pieces_start)
 
         try:
             with open(file2['full_path_client'], 'rb') as fh:
                 fh.seek(byte_start)
                 piece_data = fh.read(piece_size)
                 hash2 = hashlib.sha1(piece_data).hexdigest()
-            # logger.debug('%s computed: %s', hash2, blocknum)
+
+
+                if pieces_offset !=0:
+                    fh.seek(blocknum*piece_size)
+                    piece_data = fh.read(piece_size)
+                    hash_padded = hashlib.sha1(piece_data).hexdigest()
+                else:
+                    hash_padded = hash2
+
+            logger.debug('%s computed: %s', hash2, blocknum)
         except Exception as err:
             logger.error(err)
             tries += 1
@@ -324,12 +340,25 @@ def find_blocks_in_other_file(file1, file2):
             continue
 
         blocknum += 1
+        # logger.info('need hash %s', hash1)
+        # logger.info('computed  %s', hash2)
+        # logger.info('if padded %s', hash_padded)
+
         if hash1.lower() == hash2.lower():
             blocks_found += 1
+        elif hash1.lower() == hash_padded.lower():
+            padded_blocks_found+=1
         else:
             tries += 1
+
         if blocks_found >= 3:
             return True
+        elif padded_blocks_found >=3:
+            logger.warning('Found blocks but file is padded, setting offset to 0')
+            file1['pieces_offset'] = 0
+            return True
+
+    print('end, false')
     return False
 
 def filterout_nometa_and_completeds(torrents: list) -> list:
@@ -401,6 +430,7 @@ def add_sizes_dict_qbt(sizes: dict, torrents: list) -> None:
 
 def add_sizes_dict_dirs(sizes: dict, dirs: list) -> None:
     min_file_size = config.getint('behaviour', 'min_file_size') * 1024**2
+    reg_exclude = '^alwaysfalse$' if args.disable_regex else config.get('behaviour', 'nono_regex')
 
     if len(dirs) == 1 and dirs[0] == 'all':
         dirs = config.get('client', 'all_local_dirs').split(' ')
@@ -416,6 +446,10 @@ def add_sizes_dict_dirs(sizes: dict, dirs: list) -> None:
 
             file_size = entry.stat(follow_symlinks=False).st_size
             if file_size < min_file_size:
+                continue
+
+            if re.search(reg_exclude, entry.path):
+                #print(f'excluding {entry.path}')
                 continue
 
             if file_size not in sizes:

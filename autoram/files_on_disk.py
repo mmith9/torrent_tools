@@ -385,7 +385,7 @@ def recheck_file_full(file, client=False, alt_file=False):
                         print('.', end='')
                 blocknum += 1
 
-            file['piece_states_recheck'] = new_piece_states
+                file['piece_states_recheck'] = new_piece_states
     except Exception as err:
         logger.error('error rechecking whole file %s', err)
         return False
