@@ -572,7 +572,7 @@ if __name__ == "__main__":
 
     if args.debug:
         logger.setLevel(logging.DEBUG)
-        for name in ['autoram.files_on_disk', 'autoram.tr_payload']:
+        for name in ['files_on_disk', 'tr_payload']:
             loggie = logging.getLogger(name)
             loggie.setLevel(logging.INFO)
 

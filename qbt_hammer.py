@@ -793,8 +793,8 @@ if __name__ == "__main__":
     print('debug level is', logger.getEffectiveLevel())
     print_debug('print on debug passed')
         
-    import autoram.tr_payload
-    autoram.tr_payload.args = args
+    import tr_payload
+    tr_payload.args = args
 
     if args.hardmerge and args.crossmerge:
         print('hardmerge and crossmerge are mutually exclusive')
