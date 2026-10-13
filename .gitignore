@@ -3,3 +3,4 @@
 !*.py
 !logging.conf
 !tools.ini
+!pyproject.toml
