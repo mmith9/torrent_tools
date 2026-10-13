@@ -678,7 +678,7 @@ class Resolver:
             self.print_stats_inline()
 
     def prep_sniffer(self):
-
+        return
         alert_mask = libtorrent.alert.category_t.dht_notification
         alert_mask+= libtorrent.alert.category_t.peer_notification
         self.lt_session.set_alert_mask(alert_mask)

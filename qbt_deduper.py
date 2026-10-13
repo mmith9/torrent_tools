@@ -6,21 +6,23 @@ import os
 import re
 import shutil
 import sys
+sys.path.append('./src')
+
 import time
 
 import numpy as np
 
-from autoram.files_on_disk import get_full_client_path_for_torrent_file, recheck_file_full
-from autoram.qbt_api import connect_qbt
-from autoram.ranges import II
-from autoram.tr_payload import filter_no_meta, filterout_nometa_and_completeds, find_blocks_in_other_file
+from files_on_disk import get_full_client_path_for_torrent_file, recheck_file_full
+from qbt_api import connect_qbt
+from ranges import II
+from tr_payload import filter_no_meta, filterout_nometa_and_completeds, find_blocks_in_other_file
 from qbt_hammer import get_sizes_dict, rebuild_block
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
 
 config = configparser.ConfigParser(allow_no_value=True, delimiters='=')
-config.read('autoram.ini')
+config.read('tools.ini')
 
 
 def construct_file_dict(torrents, dict_params):
@@ -61,7 +63,7 @@ def construct_file_dict(torrents, dict_params):
                 file_offset += size
                 continue
 
-            print(f'torrent {count} of {count_trrs} and {count_files} files', end='\r')
+            print(f'torrent {count} of {count_trrs} and {count_files} files', end='\r', flush=True)
             insert = (trr, file, file_offset)
             if size not in file_dict_raw:
                 file_dict_raw[size] = []
@@ -78,11 +80,11 @@ def construct_file_dict_raw_part2(file_dict_raw):
 
     logger.debug('Extracting full info about torrents to check')
     for size, group in file_dict_raw.items():
-        print('.', end='')
+        print('.', end='', flush=True)
 
         file_dict[size] = []
         for trr, file, file_offset in group:
-            print('.', end='')
+            print('.', end='', flush=True)
             full_path_client = get_full_client_path_for_torrent_file(trr, file)
             try:
                 file_is_complete = file.progress == 1
@@ -127,6 +129,14 @@ def construct_file_dict_raw_part2(file_dict_raw):
             pieces_end = file.piece_range[1]
 
             all_states = np.asarray(trr.piece_states, dtype=np.byte)
+            if len(all_states) == 0:
+                if trr.progress == 0:
+                    logger.warning(f'\nNo piece states, constructing empty for {trr.name} with {trr.properties.pieces_num} pieces')
+                    all_states = np.zeros((trr.properties.pieces_num), dtype=np.byte)
+                else:
+                    logger.error(f'\nNo piece states for {trr.name} with progress {trr.progress}, skipping')
+                    continue
+
             piece_states = np.asarray(
                 all_states[pieces_start:pieces_end+1], dtype=np.byte)
 
@@ -383,9 +393,27 @@ def repair_torrent_using_local_file(trr_file, local_file):
             logger.error(err)
             return False
 
-        logger.info('Forcing recheck')
-        args.qbt_client.torrents_recheck(torrent_hashes=trr_file['hash'])
+        # logger.info('Forcing recheck')
+        # args.qbt_client.torrents_recheck(torrent_hashes=trr_file['hash'])
         return True
+
+    if trr_file['file'].progress < 0.05:
+        logger.info('File is less than 5% complete, just copying')
+        try:
+            path_to_make, _ = os.path.split(trr_file['full_path_client'])
+            os.makedirs(path_to_make, exist_ok=True)
+            shutil.copy(local_file['full_path_client'], trr_file['full_path_client'], )
+        except Exception as err:
+            logger.error('error copying file')
+            logger.error(err)
+            return False
+
+        # logger.info('Forcing recheck')
+        # args.qbt_client.torrents_recheck(torrent_hashes=trr_file['hash'])
+        return True
+
+    
+
 
     if not trr_file['piece_states_recheck']:
         if not recheck_file_full(trr_file, client=args.qbt_client, alt_file=local_file['full_path_client']):
@@ -421,11 +449,11 @@ def repair_torrent_using_local_file(trr_file, local_file):
             if rebuilt:
                 blocks_fixed.append(blocknum)
                 num_blocks_fixed += 1
-                print('O', end='')
+                print('O', end='', flush=True)
             else:
-                print('.', end='')
+                print('.', end='', flush=True)
         else:
-            print('o', end='')
+            print('o', end='', flush=True)
     print('\n')
     print('blocks fixed:', num_blocks_fixed)
 
@@ -551,15 +579,29 @@ if __name__ == "__main__":
     if args.dirs == ['all']:
         args.dirs = config.get('client', 'all_local_dirs').split(' ')
 
+    got_dirs = []
     for a_dir in args.dirs:
+        if not a_dir:
+            continue
         if not os.path.isdir(a_dir):
             logger.error('No dir %s', a_dir)
-            sys.exit(0)
+#            input("Enter to accept")
+            #sys.exit(0)
+        else:
+            got_dirs.append(a_dir)
+    args.dirs = got_dirs
+    time.sleep(5)
 
-    import autoram.tr_payload
-    autoram.tr_payload.args = args
+    import tr_payload
+    tr_payload.args = args
+    print(args)
+#    sys.exit(0)
     time_start = time.time()
+    import datetime
+    print("Launched at",str(datetime.datetime.now()))
     main()
     time_end = time.time()
     total_time = time_end - time_start
+    print("Finished at",str(datetime.datetime.now()))
     print("\nExecution time: " + str(total_time))
+

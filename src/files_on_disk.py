@@ -10,13 +10,13 @@ import io
 import typing
 import numpy as np
 
-from autoram.ranges import get_block_ranges, size_to_dib
+from ranges import get_block_ranges, size_to_dib
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
 
 config = configparser.ConfigParser(allow_no_value=True, delimiters='=')
-config.read('autoram.ini')
+config.read('tools.ini')
 buffer_size = config.getint('behaviour', 'buffer_size') * 1024*1024
 
 def create_drive_map(config) -> dict:
@@ -317,7 +317,6 @@ def copy_ranges_max(target, source, ranges):
 
 
 def recheck_file_full(file, client=False, alt_file=False):
-
     if client:
         hashes = client.torrents_piece_hashes(torrent_hash=file['hash'])
     else:
@@ -332,6 +331,7 @@ def recheck_file_full(file, client=False, alt_file=False):
     new_bad_blocks = 0
     bad_blocks = 0
     all_blocks = len(file['piece_states'])
+    flush = all_blocks // 17 if all_blocks >= 17 else 1
 
     logger.debug('looking for>%s>%s', file['debug'], file['filename'])
     logger.debug('offset %s blocksize %s blocks %s',
@@ -349,18 +349,13 @@ def recheck_file_full(file, client=False, alt_file=False):
     blocknum = 0 if offset == 0 else 1
     new_piece_states = []
     try:
-        with io.open(full_file_path, 'rb') as fh:
+        with open(full_file_path, 'rb') as fh:
+            fh.seek(blocknum*piece_size + offset)
 
-            fi = io.FileIO(fh.fileno())
-            fb = io.BufferedReader(fi, buffer_size=file_size)
-            fb.seek(blocknum*piece_size + offset)
-
-            # fh.seek(blocknum*piece_size + offset)
-
+            count = 0
             while blocknum*piece_size + offset < file_size:
-
-                block_data = fb.read(piece_size)
-                # block_data = fh.read(piece_size)
+                count += 1
+                block_data = fh.read(piece_size)
                 block_state = piece_states[blocknum]
 
                 hash_computed = hashlib.sha1(block_data).hexdigest()
@@ -383,9 +378,12 @@ def recheck_file_full(file, client=False, alt_file=False):
                     else:
                         bad_blocks += 1
                         print('.', end='')
-                blocknum += 1
 
+                if count % flush == 0:
+                    print("", end='', flush=True)
+                blocknum += 1
                 file['piece_states_recheck'] = new_piece_states
+            
     except Exception as err:
         logger.error('error rechecking whole file %s', err)
         return False
@@ -396,6 +394,7 @@ def recheck_file_full(file, client=False, alt_file=False):
     print(f'and {new_bad_blocks} that were good are actuall bad')
     first_bad = new_piece_states[0] == 0
     last_bad = new_piece_states[-1] == 0
+    
     return (good_blocks, new_good_blocks, bad_blocks, new_bad_blocks, first_bad, last_bad)
 
 def get_client_path_to_backup_dir(file:dict) -> str:
@@ -422,7 +421,10 @@ def get_full_client_path_for_torrent_file(torrent, file):
             break
     else:
         if drive_map:
-            logger.warning('bad temp path %s', server_temp_path)
+            if server_temp_path:
+                print("Bad temp path")
+                print(f"{server_temp_path=}")
+            client_temp_path = r"o:\bestos\t"
 
     for key, value in drive_map.items():
         if server_save_path.startswith(key):
@@ -430,10 +432,14 @@ def get_full_client_path_for_torrent_file(torrent, file):
             break
     else:
         if drive_map:
-            logger.warning('bad save path %s', server_temp_path)
+            if server_save_path:
+                print("Bad save path")
+                print(f"{server_save_path=}")
+            client_save_path = r"o:\bestos\td"
 
-    temp_path = os.path.join(client_temp_path, file.name)
-    save_path = os.path.join(client_save_path, file.name)
+
+    temp_path = os.path.join(client_temp_path, file.name).replace("/", "\\")
+    save_path = os.path.join(client_save_path, file.name).replace("/", "\\")
 
     paths = [
         temp_path,

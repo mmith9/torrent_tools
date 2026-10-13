@@ -6,26 +6,27 @@ import logging.config
 import os
 import shutil
 import sys
+sys.path.append('./src')
 import time
 from typing import List, Tuple
 
 import numpy as np
 
-from autoram.files_on_disk import (get_client_path_to_backup_dir, get_full_client_path_for_torrent_file, read_ranges, scan_tree,
+from files_on_disk import (get_client_path_to_backup_dir, get_full_client_path_for_torrent_file, read_ranges, scan_tree,
                                    verify_and_fix_physical_file, verify_block, write_block)
-from autoram.klasses import FileOfSize
-from autoram.qbt_api import connect_qbt
-from autoram.ranges import (II, estimate_gain_from_repair, get_block_ranges,
+from klasses import FileOfSize
+from qbt_api import connect_qbt
+from ranges import (II, estimate_gain_from_repair, get_block_ranges,
                             shift_ranges, size_to_dib, sum_ranges)
-from autoram.test_hashes import test_hashes
-from autoram.tr_payload import (construct_file_dict, filterout_nometa_and_completeds, get_sizes_dict, is_file_unique_to_group,
+
+from tr_payload import (construct_file_dict, filterout_nometa_and_completeds, get_sizes_dict, is_file_unique_to_group,
                                 match_same_size_files_multi)
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
 
 config = configparser.ConfigParser(allow_no_value=True, delimiters='=')
-config.read('autoram.ini')
+config.read('tools.ini')
 
 
 def merge_multi(files):
@@ -34,34 +35,37 @@ def merge_multi(files):
     for file in files:
         hashes.append(file['torrent'].hash)
 
-    all_paused = False
-    t_start = time.time()
-    while not all_paused:
+    # all_paused = False
+    # t_start = time.time()
+    # while not all_paused:
 
-        if time.time() - t_start > config.getint('behaviour', 'timeout'):
-            logger.error('torrents not paused timeout')
-            print('Torrents not paused timeout')
-            answer = 'null'
-            while answer.lower() not in ['r', 'a', 'i']:
-                answer = input(
-                    '(r)etry pausing, (i)gnore pausing, (s)kip').lower()
+    #     if time.time() - t_start > config.getint('behaviour', 'timeout'):
+    #         for trr in torrents:
+    #             print(f"{trr['state']} {trr.name}")
+    #         logger.error('torrents not paused timeout')
+    #         print('Torrents not paused timeout')
+    #         answer = 'null'
+    #         while answer.lower() not in ['r', 'a', 'i']:
+    #             answer = input(
+    #                 '(r)etry pausing, (i)gnore pausing, (s)kip').lower()
 
-            if answer == 'r':
-                t_start = time.time()
-                continue
-            if answer == 's':
-                return False
-            if answer == 'i':
-                break
+    #         if answer == 'r':
+    #             t_start = time.time()
+    #             continue
+    #         if answer == 's':
+    #             return False
+    #         if answer == 'i':
+    #             break
 
-        torrents = args.qbt_client.torrents_info(hashes=hashes)
-        all_paused = True
-        for trr in torrents:
-            all_paused = all_paused and trr['state'].lower(
-            ).startswith('paused')
-        if not all_paused:
-            args.qbt_client.torrents_pause(hashes=hashes)
-            time.sleep(5)
+    #     torrents = args.qbt_client.torrents_info(hashes=hashes)
+    #     all_paused = True
+    #     for trr in torrents:
+    #         all_paused = all_paused and (trr['state'].lower(
+    #         ).startswith('paused') or trr['state'].lower(
+    #         ).startswith('error'))
+    #     if not all_paused:
+    #         args.qbt_client.torrents_pause(hashes=hashes)
+    #         time.sleep(5)
 
     for file in files:
         if file['file_exists']:
@@ -142,13 +146,14 @@ def merge_multi_ready(files):
 
         if end_now:
             continue
-        
-        logger.debug('entering hammer subroutine')
-        blocks_hammered = loop_hammer_block(
-            file0, other_files, blocks_fixed)
-        logger.debug('hammering subroutine exiting')
-        if len(blocks_hammered) > 0:
-            hashes_to_recheck.add(file0['hash'])
+
+        if args.hammer:
+            logger.debug('entering hammer subroutine')
+            blocks_hammered = loop_hammer_block(
+                file0, other_files, blocks_fixed)
+            logger.debug('hammering subroutine exiting')
+            if len(blocks_hammered) > 0:
+                hashes_to_recheck.add(file0['hash'])
 
     # exclusive with cross merge
     if not args.crossmerge:
@@ -177,7 +182,7 @@ def find_files_to_merge(file_dict):
     logger.info('found %s size groups', groups_total)
     for _, files in file_dict.items():
         count += 1
-        print(f'{count}', end='   \r')
+        print(f'{count}', end='   \r', flush=True)
         if len(files) > group_limit:
             print()
             logger.debug(
@@ -233,11 +238,11 @@ def loop_rebuild_block(file0, files):
             if rebuilt:
                 blocks_fixed.append(blocknum)
                 num_blocks_fixed += 1
-                print('O', end='')
+                print('O', end='', flush=True)
             else:
-                print('.', end='')
+                print('.', end='', flush=True)
         else:
-            print('o', end='')
+            print('o', end='', flush=True)
     print('\n')
     print('blocks fixed:', num_blocks_fixed)
     return blocks_fixed
@@ -332,7 +337,7 @@ def loop_hammer_block(file0, files, blocks_fixed):
     for blocknum, status in enumerate(file0['piece_states']):
         logger.debug('considering block %s', blocknum)
         if blocknum in blocks_fixed:
-            print('O', end='')
+            print('O', end='', flush=True)
             continue
         if status != 2:
             logger.debug('hammering block %s', blocknum)
@@ -341,18 +346,18 @@ def loop_hammer_block(file0, files, blocks_fixed):
             if rebuilt:
                 blocks_hammered.append(blocknum)
                 num_blocks_hammered += 1
-                print('T', end='')
+                print('T', end='', flush=True)
             else:
-                print('.', end='')
+                print('.', end='', flush=True)
         else:
-            print('o', end='')
+            print('o', end='', flush=True)
     print('\n')
     print('blocks hammered:', num_blocks_hammered)
     return blocks_hammered
 
-def print_debug(text:str, end:str='\n')->None:
+def print_debug(text:str, end:str='\n', flush=True)->None:
     if logger.getEffectiveLevel()<=logging.DEBUG:
-        print(text, end=end)
+        print(text, end=end, flush=flush)
 
 def input_debug():
     if logger.getEffectiveLevel()<=logging.DEBUG:
@@ -394,12 +399,12 @@ def hammer_block(source_file, blocknum, source_files):
     del check_ranges
     logger.debug('combined shifted atomic ranges %s', len(shifted_atomic_ranges))
 
-    print_debug('Detecting zero ranges in possible blocks', end=' ')
+    print_debug('Detecting zero ranges in possible blocks', end=' ', flush=True)
     for data_block in block_pool:
         max_subblock_size = int(
             len(data_block) / (2 ^ config.getint('behaviour', 'slicing_depth')))
         zero_ranges = detect_non_zero_ranges_in_block(data_block, max_subblock_size)
-        print_debug(zero_ranges, end=' ')
+        print_debug(zero_ranges, end=' ', flush=True)
         for atomic in zero_ranges:
             atomic_shifted = II.closed(atomic.lower, atomic.upper)
             shifted_atomic_ranges.append(atomic_shifted)
@@ -411,7 +416,7 @@ def hammer_block(source_file, blocknum, source_files):
     logger.debug('Total deduped shifted atomic ranges %s', len(shifted_atomic_ranges))
 
     while len(shifted_atomic_ranges) > 0:
-        print_debug(f'*{len(shifted_atomic_ranges)} ', end=' ')
+        print_debug(f'*{len(shifted_atomic_ranges)} ', end=' ', flush=True)
         atomic0 = shifted_atomic_ranges.pop()
         no_overlap = True
         for atomic in reversed(shifted_atomic_ranges):
@@ -419,16 +424,16 @@ def hammer_block(source_file, blocknum, source_files):
                 shifted_atomic_ranges.remove(atomic)
                 continue                
             if atomic0 & atomic != II.empty():
-                print_debug('overlap of ', end ='')
-                print_debug(atomic0, end=' ')
-                print_debug(atomic, end=' ')
+                print_debug('overlap of ', end='', flush=True)
+                print_debug(atomic0, end=' ', flush=True)
+                print_debug(atomic, end=' ', flush=True)
                 no_overlap = False
                 shifted_atomic_ranges.remove(atomic)
-                print_debug('fission to: ', end ='')
+                print_debug('fission to: ', end='', flush=True)
                 for fission in [atomic0 - atomic, atomic - atomic0, atomic0 & atomic]:
                     if fission != II.empty():
                         for subatomic in fission:
-                            print_debug(subatomic, end =' ')
+                            print_debug(subatomic, end=' ', flush=True)
                             shifted_atomic_ranges.append(
                                 II.closed(subatomic.lower, subatomic.upper))
                 print_debug(':end')
@@ -500,9 +505,9 @@ def hammer_block(source_file, blocknum, source_files):
             return False
 
     
-    print_debug('!', end='')
+    print_debug('!', end='', flush=True)
     while True:
-        print_debug('`', end='')
+        print_debug('`', end='', flush=True)
         if is_shared_block:
             block_fixed = verify_block_shared(
                 source_file, blocknum=blocknum, 
@@ -514,7 +519,7 @@ def hammer_block(source_file, blocknum, source_files):
                 source_file, blocknum=blocknum, block_data=hammered_block)
             print_debug(f'verify {block_fixed}')
 
-        print_debug('`', end='')
+        print_debug('`', end='', flush=True)
         if block_fixed:
             print_debug('#########################')
             logger.debug('block %s fixed', blocknum)
@@ -522,10 +527,10 @@ def hammer_block(source_file, blocknum, source_files):
             print_debug('#########################')
             return result
 
-        print_debug('`', end='')
+        print_debug('`', end='', flush=True)
         all_zeroed = True
         for x in hammer_ranges:
-            print_debug('.', end='')
+            print_debug('.', end='', flush=True)
             counters[x] += 1
             if counters[x] >= len(block_matrix[x]):
                 counters[x] = 0
@@ -537,7 +542,7 @@ def hammer_block(source_file, blocknum, source_files):
                 all_zeroed = False
                 break
 
-        print_debug('`', end='')
+        print_debug('`', end='', flush=True)
         if all_zeroed:
             print_debug('')
             break
@@ -616,8 +621,11 @@ def hard_merge(file0, all_files):
 
             #dir_to_make, _ = os.path.split(new_path_client)
             os.makedirs(new_path_client, exist_ok=True)
-            shutil.move(file['full_path_client'], new_path_client)
-            logger.debug('file moved')
+            try:
+                shutil.move(file['full_path_client'], new_path_client)
+                logger.debug('file moved')
+            except Exception as err:
+                logger.error("file not moved") 
 
             with open(
                 os.path.join(backup_dir,f'log_{time_now}.txt'), 'a', encoding='utf-8') as fh:
@@ -691,9 +699,9 @@ def main():
     file_dict = construct_file_dict(torrents, dict_params, args.disable_regex)
     merge_list = find_files_to_merge(file_dict)
 
-    print(f'groups: {len(merge_list)} of ', end='')
+    print(f'groups: {len(merge_list)} of ', end='', flush=True)
     for group in merge_list:
-        print(f'{len(group)} ', end='')
+        print(f'{len(group)} ', end='', flush=True)
     print('\nfiles')
 
     hashes = get_unique_hashes(merge_list)
@@ -767,6 +775,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    import functools
+    print = functools.partial(print, flush=True)    
+
     #print(__name__)
     #logger.debug('init check')
 
@@ -788,6 +799,8 @@ if __name__ == "__main__":
     if args.hardmerge and args.crossmerge:
         print('hardmerge and crossmerge are mutually exclusive')
     else:
+        print(args)
+#        sys.exit(0)
         time_start = time.time()
         main()
         time_end = time.time()

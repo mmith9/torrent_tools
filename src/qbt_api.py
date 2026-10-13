@@ -7,7 +7,7 @@ import qbittorrentapi
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
 config = configparser.ConfigParser(allow_no_value=True, delimiters='=')
-config.read('autoram.ini')
+config.read('tools.ini')
 
 def connect_qbt():
     qbt_client = qbittorrentapi.Client(

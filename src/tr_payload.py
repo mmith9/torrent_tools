@@ -6,19 +6,20 @@ import os
 import re
 import time
 from typing import Any, List, Tuple
-from autoram.klasses import FileOfSize
+from klasses import FileOfSize
 
 import numpy as np
 
-from autoram.files_on_disk import get_full_client_path_for_torrent_file, is_physical_file_unique, scan_tree
-from autoram.ranges import II
+from files_on_disk import get_full_client_path_for_torrent_file, is_physical_file_unique, scan_tree
+from mib_kib import mib_kib
+from ranges import II
 
 logging.config.fileConfig('logging.conf')
 logger = logging.getLogger(__name__)
 print(__name__)
 
 config = configparser.ConfigParser(allow_no_value=True, delimiters='=')
-config.read('autoram.ini')
+config.read('tools.ini')
 
 def filter_no_meta(torrents):
     gots_meta = []
@@ -40,7 +41,8 @@ def filter_no_pieces(torrents):
     return gots_pieces
 
 def construct_file_dict(torrents, dict_params, disable_regex):
-    reg_exclude = config.get('behaviour', 'nono_regex')
+    reg_exclude = '^alwaysfalse$' if disable_regex else config.get('behaviour', 'nono_regex')
+    #reg_exclude = config.get('behaviour', 'nono_regex')
     reg_targets = dict_params['tg_regex']
     filemax = dict_params['filemax']
 
@@ -71,14 +73,14 @@ def construct_file_dict(torrents, dict_params, disable_regex):
             skip = False
             #skip = skip or file.priority == 0
             skip = skip or size < min_file_size
-            skip = skip or (not disable_regex and  re.search(reg_exclude, file.name))
+            skip = skip or (re.search(reg_exclude, file.name, re.I))
             if skip:
                 file_offset += size
                 continue
 
             insert = (trr, file, file_offset)
             if reg_targets:
-                if re.search(reg_targets, file.name):
+                if re.search(reg_targets, file.name, re.I):
                     targets.append(insert)
 
             if size not in file_dict_raw:
@@ -281,14 +283,15 @@ def find_blocks_in_other_file(file1, file2):
         logger.info('ranges empty')
         return False
 
-#    print('comparing blocks')
+    print('comparing blocks')
     piece_size = file1['piece_size']
-#    print('piece size', piece_size)
+    print('piece size', piece_size, mib_kib(piece_size))
+    print('file size', file1['size'], mib_kib(file1['size']))
     file_offset = file1['file_offset']
-#    print('file offset', file_offset)
+    print('file offset', file_offset, mib_kib(file_offset))
 
     pieces_offset = file1['pieces_offset']
-#    print('piece offset', pieces_offset)
+    print('piece offset', pieces_offset)
 
     pieces_start = file1['pieces_start']
     torrent_hashes = file1['torrent'].piece_hashes
@@ -340,9 +343,9 @@ def find_blocks_in_other_file(file1, file2):
             continue
 
         blocknum += 1
-        # logger.info('need hash %s', hash1)
-        # logger.info('computed  %s', hash2)
-        # logger.info('if padded %s', hash_padded)
+#        logger.info('need hash %s', hash1)
+#        logger.info('computed  %s', hash2)
+#        logger.info('if padded %s', hash_padded)
 
         if hash1.lower() == hash2.lower():
             blocks_found += 1
@@ -448,7 +451,7 @@ def add_sizes_dict_dirs(sizes: dict, dirs: list) -> None:
             if file_size < min_file_size:
                 continue
 
-            if re.search(reg_exclude, entry.path):
+            if re.search(reg_exclude, entry.path, re.I):
                 #print(f'excluding {entry.path}')
                 continue
 
